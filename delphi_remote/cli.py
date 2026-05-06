@@ -48,19 +48,46 @@ def main(verbose: bool) -> None:
                    "Walks up from the dproj for .delphi_remote.yaml if omitted.")
 @click.option("--no-watchdog", is_flag=True,
               help="Disable the dialog watchdog entirely.")
+@click.option("--no-watcher", is_flag=True,
+              help="Skip the resident watcher daemon even if one is running.")
+@click.option("--watcher-port", type=int, default=None,
+              help="Override the watcher TCP port (default 17556).")
+@click.option("--no-auto-start", is_flag=True,
+              help="Fail if the IDE isn't already running with the project loaded "
+                   "(default: launch bds.exe via the dproj file association).")
 def build(dproj: Path, build_config: str, target_platform: str, timeout: float,
-          rules_path: Path | None, no_watchdog: bool) -> None:
+          rules_path: Path | None, no_watchdog: bool,
+          no_watcher: bool, watcher_port: int | None,
+          no_auto_start: bool) -> None:
     """Compile a Delphi project via the running IDE."""
     from delphi_remote.build import Builder
     from delphi_remote.ide_client import BridgeError, DelphiIDE
     from delphi_remote.watchdog import DialogWatchdog, default_rules_path, load_rules
 
+    if not no_watcher:
+        from delphi_remote.watcher import DEFAULT_HOST, DEFAULT_PORT, send_request
+
+        port = watcher_port or DEFAULT_PORT
+        response = send_request(
+            "build",
+            {"dproj": str(dproj), "config": build_config,
+             "platform": target_platform, "timeout": timeout,
+             "auto_start": not no_auto_start},
+            host=DEFAULT_HOST, port=port,
+            read_timeout=timeout + 120.0,
+        )
+        if response is not None:
+            click.echo(json.dumps(response, indent=2, ensure_ascii=False))
+            status = response.get("status")
+            sys.exit(0 if status == "ok" else 1 if status == "errors" else 2)
+
     ide = DelphiIDE()
-    try:
-        ide.attach()
-    except BridgeError as e:
-        click.echo(json.dumps({"status": "bridge_error", "error": str(e)}))
-        sys.exit(2)
+    if no_auto_start:
+        try:
+            ide.attach()
+        except BridgeError as e:
+            click.echo(json.dumps({"status": "bridge_error", "error": str(e)}))
+            sys.exit(2)
 
     watchdog: DialogWatchdog | None = None
     if not no_watchdog:
@@ -81,6 +108,7 @@ def build(dproj: Path, build_config: str, target_platform: str, timeout: float,
             timeout=timeout,
             build_config=build_config,
             target_platform=target_platform,
+            auto_start=not no_auto_start,
         )
     except BridgeError as e:
         click.echo(json.dumps({"status": "bridge_error", "error": str(e)}))
@@ -111,10 +139,23 @@ def _resolve_rules_path(dproj: Path) -> Path:
 
 
 @main.command()
-def inspect() -> None:
+@click.option("--no-watcher", is_flag=True,
+              help="Skip the resident watcher daemon even if one is running.")
+@click.option("--watcher-port", type=int, default=None,
+              help="Override the watcher TCP port (default 17556).")
+def inspect(no_watcher: bool, watcher_port: int | None) -> None:
     """Report the current IDE state as JSON (active project, unit, build state)."""
     from delphi_remote.ide_client import BridgeError, DelphiIDE
     from delphi_remote.inspector import Inspector
+
+    if not no_watcher:
+        from delphi_remote.watcher import DEFAULT_HOST, DEFAULT_PORT, send_request
+
+        port = watcher_port or DEFAULT_PORT
+        response = send_request("inspect", host=DEFAULT_HOST, port=port)
+        if response is not None:
+            click.echo(json.dumps(response, indent=2, ensure_ascii=False))
+            sys.exit(0 if response.get("status") == "ok" else 2)
 
     ide = DelphiIDE()
     try:
@@ -131,6 +172,57 @@ def inspect() -> None:
 
     payload = {"status": "ok", **state.to_dict()}
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+@main.command()
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Bind address. Use 127.0.0.1 unless you know what you're doing.")
+@click.option("--port", default=17556, show_default=True, type=int,
+              help="TCP port to listen on.")
+@click.option("--rules", "rules_path",
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Watchdog rules YAML. Defaults to the package-bundled rules.")
+def watch(host: str, port: int, rules_path: Path | None) -> None:
+    """Run the bridge as a resident daemon (keeps UIA warm for fast builds)."""
+    from delphi_remote.watcher import serve
+    from delphi_remote.watchdog import default_rules_path
+
+    rules = rules_path or default_rules_path()
+    click.echo(json.dumps({
+        "status": "ok", "watcher_listening": True,
+        "host": host, "port": port, "rules": str(rules),
+    }), err=True)
+    try:
+        serve(host, port, Path(rules))
+    except KeyboardInterrupt:
+        click.echo(json.dumps({"status": "ok", "stopped": "by_user"}), err=True)
+
+
+@main.command("watcher-status")
+@click.option("--port", type=int, default=17556, show_default=True)
+def watcher_status(port: int) -> None:
+    """Probe the resident watcher; reports uptime if alive."""
+    from delphi_remote.watcher import DEFAULT_HOST, send_request
+
+    response = send_request("ping", host=DEFAULT_HOST, port=port)
+    if response is None:
+        click.echo(json.dumps({"status": "not_running", "port": port}))
+        sys.exit(2)
+    click.echo(json.dumps(response, indent=2, ensure_ascii=False))
+    sys.exit(0 if response.get("status") == "ok" else 2)
+
+
+@main.command("watcher-stop")
+@click.option("--port", type=int, default=17556, show_default=True)
+def watcher_stop(port: int) -> None:
+    """Ask the resident watcher to shut down cleanly."""
+    from delphi_remote.watcher import DEFAULT_HOST, send_request
+
+    response = send_request("shutdown", host=DEFAULT_HOST, port=port)
+    if response is None:
+        click.echo(json.dumps({"status": "not_running", "port": port}))
+        sys.exit(2)
+    click.echo(json.dumps(response, indent=2, ensure_ascii=False))
 
 
 @main.command("inspect-windows")

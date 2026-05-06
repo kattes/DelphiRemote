@@ -22,4 +22,11 @@ rules:
     action: click_button
     button: ["OK"]
 
+  - name: "Post-build progress dialog"
+    match:
+      window_class: TProgressForm
+      name: "Erzeugen"
+    action: click_button
+    button: ["OK"]
+
 default_action: log_only

@@ -6,15 +6,20 @@ panels reliably, so UIA is the only viable option even though it's slower.
 from __future__ import annotations
 
 import logging
+import os
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from pywinauto import Application
+from pywinauto.application import ProcessNotFoundError
 from pywinauto.findwindows import ElementAmbiguousError, ElementNotFoundError
 
 log = logging.getLogger(__name__)
 
 IDE_EXECUTABLE = "bds.exe"
+IDE_MAIN_WINDOW_CLASS = "TAppBuilder"
 
 
 class BridgeError(RuntimeError):
@@ -41,7 +46,7 @@ class DelphiIDE:
             self._app = Application(backend="uia").connect(
                 path=IDE_EXECUTABLE, timeout=timeout
             )
-        except ElementNotFoundError as e:
+        except (ElementNotFoundError, ProcessNotFoundError) as e:
             raise BridgeError(
                 f"Delphi IDE ({IDE_EXECUTABLE}) not running — start it and retry"
             ) from e
@@ -49,9 +54,22 @@ class DelphiIDE:
             raise BridgeError(
                 f"Multiple {IDE_EXECUTABLE} processes found — pid selection not yet supported"
             ) from e
+
+        # Specifically pick the TAppBuilder window — top_window() can return
+        # the splash screen during cold boot, which then disappears and leaves
+        # a stale handle that reads empty titles.
+        # Enumerate windows directly rather than going through window().element_info
+        # so we don't pay pywinauto's default 5-second window-find timeout when
+        # TAppBuilder isn't up yet.
+        main = self._find_main_window_now()
+        if main is None:
+            raise BridgeError(
+                f"IDE main window ({IDE_MAIN_WINDOW_CLASS}) not yet visible "
+                f"(splash screen still up?). Retry shortly."
+            )
         try:
-            self._main = self._app.top_window()
-            info = self._main.element_info
+            self._main = main
+            info = main.element_info
             handle = IDEHandle(
                 process_id=self._app.process,
                 main_window_title=info.name or "",
@@ -59,6 +77,7 @@ class DelphiIDE:
             )
         except Exception as e:
             raise BridgeError(f"Could not enumerate IDE main window: {e!r}") from e
+
         log.info("Attached to %s pid=%s title=%r", IDE_EXECUTABLE, handle.process_id,
                  handle.main_window_title)
         return handle
@@ -93,6 +112,122 @@ class DelphiIDE:
             self._main.set_focus()
         except Exception as e:
             raise BridgeError(f"Could not focus main window: {e!r}") from e
+
+    def ensure_project_loaded(
+        self,
+        dproj: Path,
+        *,
+        startup_timeout: float = 90.0,
+        load_timeout: float = 60.0,
+    ) -> IDEHandle:
+        """Make sure the IDE is running with `dproj` as the active project.
+
+        - If no IDE is running, ``bds.exe`` is launched via Windows file
+          association on the dproj (same as double-clicking it in Explorer).
+        - If an IDE is running with a different project, the same file
+          association is used to ask the running IDE to load the dproj.
+        - If the right project is already loaded, this returns immediately.
+
+        Raises BridgeError on timeout or if the IDE never reaches the expected
+        state.
+        """
+        project_name = dproj.stem
+        expected_prefix = f"{project_name} - "
+
+        try:
+            handle = self.attach(timeout=2.0)
+        except BridgeError:
+            log.info("IDE not running — launching it with %s", dproj.name)
+            self._launch_via_association(dproj)
+            handle = self._poll_for_attach(deadline_seconds=startup_timeout)
+
+        if not handle.main_window_title.startswith(expected_prefix):
+            log.info("Active project differs — asking IDE to load %s", dproj.name)
+            self._launch_via_association(dproj)
+
+        if not handle.main_window_title.startswith(expected_prefix):
+            handle = self._wait_for_project(expected_prefix, dproj, load_timeout)
+
+        return handle
+
+    @staticmethod
+    def _launch_via_association(dproj: Path) -> None:
+        try:
+            os.startfile(str(dproj))
+        except OSError as e:
+            raise BridgeError(
+                f"Could not open {dproj} via file association: {e!r}. "
+                f"Verify .dproj is registered to bds.exe in Windows."
+            ) from e
+
+    def _poll_for_attach(self, *, deadline_seconds: float) -> IDEHandle:
+        deadline = time.monotonic() + deadline_seconds
+        last_err: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                return self.attach(timeout=1.0)
+            except BridgeError as e:
+                last_err = e
+                time.sleep(0.5)
+        raise BridgeError(
+            f"Delphi IDE did not become attachable within {deadline_seconds:.0f}s "
+            f"(last error: {last_err!r})"
+        )
+
+    def _wait_for_project(self, expected_prefix: str, dproj: Path,
+                          timeout: float) -> IDEHandle:
+        deadline = time.monotonic() + timeout
+        last_title = ""
+        last_log = 0.0
+        last_class = ""
+        while time.monotonic() < deadline:
+            # Re-resolve the main window each iteration. The window we attached
+            # to during boot may have been the splash, which is now closed.
+            main = self._find_main_window_now()
+            if main is not None:
+                try:
+                    info = main.element_info
+                    self._main = main
+                    last_title = info.name or ""
+                    last_class = info.class_name or ""
+                except Exception as e:
+                    log.debug("Could not read IDE title yet: %r", e)
+                    last_title = ""
+
+            if time.monotonic() - last_log > 5.0:
+                log.info("Waiting for project %r to load (current title: %r)",
+                         dproj.name, last_title)
+                last_log = time.monotonic()
+
+            if last_title.startswith(expected_prefix):
+                return IDEHandle(
+                    process_id=self.process_id,
+                    main_window_title=last_title,
+                    main_window_class=last_class,
+                )
+            time.sleep(0.5)
+        raise BridgeError(
+            f"Project {dproj.name!r} did not become active within {timeout:.0f}s "
+            f"(last title: {last_title!r})"
+        )
+
+    def _find_main_window_now(self) -> Any | None:
+        """Return the TAppBuilder window if it currently exists, else None.
+
+        Avoids pywinauto's default window-find timeout — fast even when missing.
+        """
+        if self._app is None:
+            return None
+        try:
+            for handle in self._app.windows():
+                try:
+                    if handle.class_name() == IDE_MAIN_WINDOW_CLASS:
+                        return handle
+                except Exception:
+                    continue
+        except Exception:
+            return None
+        return None
 
     def list_top_level_windows(self) -> list:
         if self._app is None:

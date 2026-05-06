@@ -172,7 +172,8 @@ class Builder:
 
     def build(self, dproj: Path, *, timeout: float = 180.0,
               build_config: str | None = None,
-              target_platform: str | None = None) -> BuildResult:
+              target_platform: str | None = None,
+              auto_start: bool = True) -> BuildResult:
         from pywinauto import mouse
         from pywinauto.keyboard import send_keys
 
@@ -183,21 +184,16 @@ class Builder:
         start = time.monotonic()
         project_name = dproj.stem
 
+        if auto_start:
+            self.ide.ensure_project_loaded(dproj)
+
         title = self.ide.read_main_window_title()
         if not title.startswith(f"{project_name} - "):
             raise BridgeError(
                 f"Active IDE project does not match {dproj.name!r} "
-                f"(window title: {title!r}). Open the project in the IDE first."
+                f"(window title: {title!r}). Open the project in the IDE first, "
+                f"or omit --no-auto-start to let the bridge launch it."
             )
-
-        meldungen = self.ide.find_first(
-            name=MELDUNGEN_PANEL_NAME, class_name=MELDUNGEN_PANEL_CLASS,
-        )
-        if meldungen is None:
-            raise BridgeError(
-                "Meldungen panel not found. Open it via Ansicht → Meldungen and retry."
-            )
-        rect = meldungen.rectangle
 
         try:
             saved_clip = _read_clipboard_text()
@@ -211,8 +207,15 @@ class Builder:
         try:
             self.ide.focus_main_window()
             time.sleep(0.2)
-            log.info("Triggering compile (Strg+F9)")
-            send_keys("^{F9}")
+
+            # Use Build (Umschalt+F9), not Compile (Strg+F9). Compile is a
+            # no-op when the .exe is newer than all sources — title flips to
+            # [Erzeugt] but no Meldungen output is produced. Build always
+            # recompiles, which guarantees we get diagnostics. The IDE also
+            # auto-shows the Meldungen panel as output is produced (provided
+            # the user has it enabled in their layout — one-time IDE setup).
+            log.info("Triggering build (Umschalt+F9)")
+            send_keys("+{F9}")
 
             final_title = self._wait_for_build_complete(timeout=timeout)
             log.info("Build settled, title=%r", final_title)
@@ -227,6 +230,29 @@ class Builder:
                 else:
                     time.sleep(0.3)
                     self.watchdog.scan_and_dismiss()
+
+            # Locate Meldungen *after* the compile. On a cold-boot IDE the
+            # panel is auto-hidden; the IDE shows it once compile output exists.
+            meldungen = self.ide.find_first(
+                name=MELDUNGEN_PANEL_NAME, class_name=MELDUNGEN_PANEL_CLASS,
+            )
+            if meldungen is None:
+                raise BridgeError(
+                    "Meldungen panel not found even after Build. "
+                    "One-time IDE setup needed: open the panel manually via "
+                    "Ansicht → Werkzeugfenster → Meldungen (or Ansicht → Meldungen). "
+                    "The IDE will remember it for future sessions."
+                )
+
+            # Re-foreground the IDE and re-resolve the panel rect immediately
+            # before clicking. The watchdog scan above can take several seconds,
+            # during which the user (or an OS popup) might shift the IDE window.
+            self.ide.focus_main_window()
+            time.sleep(0.2)
+            meldungen = self.ide.find_first(
+                name=MELDUNGEN_PANEL_NAME, class_name=MELDUNGEN_PANEL_CLASS,
+            ) or meldungen
+            rect = meldungen.rectangle
 
             cx = (rect.left + rect.right) // 2
             cy = (rect.top + rect.bottom) // 2 - 15  # avoid the TTabSet at the bottom edge
