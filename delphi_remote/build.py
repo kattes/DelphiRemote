@@ -242,6 +242,13 @@ class Builder:
         _set_clipboard_text(sentinel)
 
         try:
+            # Make sure the Meldungen panel is visible before we trigger the
+            # build. Without it we can't capture diagnostics. Toggling via
+            # Alt+Umschalt+M is a no-op when the panel is already there, so
+            # we check first and only send the shortcut when the panel is
+            # missing — otherwise we'd hide a panel the user wanted open.
+            self._ensure_meldungen_visible()
+
             # Use Build (Umschalt+F9), not Compile (Strg+F9). Compile is a
             # no-op when the .exe is newer than all sources — title flips to
             # [Erzeugt] but no Meldungen output is produced. Build always
@@ -320,6 +327,24 @@ class Builder:
                 except Exception as e:
                     log.warning("Could not re-minimize IDE: %r", e)
             _restore_foreground_hwnd(original_foreground)
+
+    def _ensure_meldungen_visible(self) -> None:
+        """Open the Meldungen panel via Alt+Umschalt+M if it isn't already
+        in the IDE's UIA tree. Idempotent: skips the keystroke when the
+        panel is present, since Alt+Umschalt+M is a toggle.
+        """
+        existing = self.ide.find_first(
+            name=MELDUNGEN_PANEL_NAME, class_name=MELDUNGEN_PANEL_CLASS,
+        )
+        if existing is not None:
+            return
+        log.info("Meldungen panel not visible — sending Alt+Umschalt+M")
+        try:
+            self.ide.main_window.type_keys("%+m", set_foreground=True)
+        except Exception as e:
+            log.warning("Could not send Alt+Umschalt+M to open Meldungen: %r", e)
+            return
+        time.sleep(0.4)
 
     def _dismiss_pending_dialogs(self) -> int:
         """Run a single watchdog pass; safe to call any time. Returns count dismissed."""
