@@ -124,6 +124,7 @@ class DialogWatchdog:
 
     def _click_button_in(self, root: Any, rule: DialogRule) -> bool:
         from pywinauto import mouse
+        from pywinauto.controls.uiawrapper import UIAWrapper
 
         # Capture identity BEFORE clicking — once the dialog closes its UIA
         # handle goes stale and these reads return empty strings.
@@ -134,23 +135,42 @@ class DialogWatchdog:
             target = _find_button(root, button_name)
             if target is None:
                 continue
+
+            # Prefer UIA InvokePattern — no system cursor movement, no focus
+            # competition with whatever the user is doing.
+            dispatched = False
+            method = "<none>"
             try:
-                rect = target.rectangle
-                cx = (rect.left + rect.right) // 2
-                cy = (rect.top + rect.bottom) // 2
+                wrapper = UIAWrapper(target)
+                wrapper.invoke()
+                dispatched = True
+                method = "uia_invoke"
+                log.info("Watchdog: invoked %r via UIA for rule %r",
+                         button_name, rule.name)
             except Exception as e:
-                log.warning("Could not read rectangle of button %r in rule %r: %r",
-                            button_name, rule.name, e)
-                continue
-            log.info("Watchdog: clicking %r at (%d, %d) for rule %r",
-                     button_name, cx, cy, rule.name)
-            mouse.click(button="left", coords=(cx, cy))
+                log.debug("UIA invoke failed for %r (%r); will fall back",
+                          button_name, e)
+
+            if not dispatched:
+                try:
+                    rect = target.rectangle
+                    cx = (rect.left + rect.right) // 2
+                    cy = (rect.top + rect.bottom) // 2
+                except Exception as e:
+                    log.warning("Could not read rectangle of button %r in rule %r: %r",
+                                button_name, rule.name, e)
+                    continue
+                log.info("Watchdog: coord-clicking %r at (%d, %d) for rule %r",
+                         button_name, cx, cy, rule.name)
+                mouse.click(button="left", coords=(cx, cy))
+                method = "coord_click"
+
             time.sleep(0.2)
             self.events.append(DialogEvent(
                 rule_name=rule.name,
                 class_name=root_class,
                 name=root_name,
-                button_clicked=button_name,
+                button_clicked=f"{button_name} [{method}]",
                 timestamp=time.time(),
             ))
             return True

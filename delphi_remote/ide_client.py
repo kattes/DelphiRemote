@@ -113,6 +113,51 @@ class DelphiIDE:
         except Exception as e:
             raise BridgeError(f"Could not focus main window: {e!r}") from e
 
+    def restore_if_minimized(self) -> bool:
+        """Restore the IDE main window if it's minimized to the taskbar.
+
+        type_keys(set_foreground=True) brings a window forward but does not
+        un-minimize it — keystrokes sent to a minimized HWND are dropped.
+
+        Returns True if the window was restored, False if it was already
+        in a normal/maximized state. Callers can use this to decide whether
+        to re-minimize after their work.
+        """
+        if self._main is None:
+            raise BridgeError("Not attached — call attach() first")
+        try:
+            import win32con
+            import win32gui
+
+            hwnd = self._main.element_info.handle
+            if not hwnd:
+                return False
+            if win32gui.IsIconic(hwnd):
+                log.info("IDE main window is minimized — restoring (hwnd=%s)", hwnd)
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                time.sleep(0.4)
+                return True
+            return False
+        except Exception as e:
+            log.warning("Could not check/restore minimized state: %r", e)
+            return False
+
+    def minimize_main_window(self) -> None:
+        """Minimize the IDE main window — used to undo a restore_if_minimized()."""
+        if self._main is None:
+            raise BridgeError("Not attached — call attach() first")
+        try:
+            import win32con
+            import win32gui
+
+            hwnd = self._main.element_info.handle
+            if not hwnd:
+                return
+            log.info("Re-minimizing IDE main window (hwnd=%s)", hwnd)
+            win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+        except Exception as e:
+            log.warning("Could not minimize IDE main window: %r", e)
+
     def ensure_project_loaded(
         self,
         dproj: Path,
