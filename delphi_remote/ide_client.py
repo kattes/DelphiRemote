@@ -1,0 +1,208 @@
+"""IDE client — wraps pywinauto for control of a running Delphi RAD Studio IDE.
+
+Backend: UIA (UI Automation). The Win32 backend cannot reach modern Delphi
+panels reliably, so UIA is the only viable option even though it's slower.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any
+
+from pywinauto import Application
+from pywinauto.findwindows import ElementAmbiguousError, ElementNotFoundError
+
+log = logging.getLogger(__name__)
+
+IDE_EXECUTABLE = "bds.exe"
+
+
+class BridgeError(RuntimeError):
+    """Bridge failed to reach or operate the IDE."""
+
+
+@dataclass
+class IDEHandle:
+    process_id: int
+    main_window_title: str
+    main_window_class: str
+
+
+class DelphiIDE:
+    """Thin wrapper around a running bds.exe process."""
+
+    def __init__(self) -> None:
+        self._app: Application | None = None
+        self._main: Any = None  # pywinauto WindowSpecification
+
+    def attach(self, timeout: float = 5.0) -> IDEHandle:
+        """Attach to a running Delphi IDE. Raises BridgeError if not found."""
+        try:
+            self._app = Application(backend="uia").connect(
+                path=IDE_EXECUTABLE, timeout=timeout
+            )
+        except ElementNotFoundError as e:
+            raise BridgeError(
+                f"Delphi IDE ({IDE_EXECUTABLE}) not running — start it and retry"
+            ) from e
+        except ElementAmbiguousError as e:
+            raise BridgeError(
+                f"Multiple {IDE_EXECUTABLE} processes found — pid selection not yet supported"
+            ) from e
+        try:
+            self._main = self._app.top_window()
+            info = self._main.element_info
+            handle = IDEHandle(
+                process_id=self._app.process,
+                main_window_title=info.name or "",
+                main_window_class=info.class_name or "",
+            )
+        except Exception as e:
+            raise BridgeError(f"Could not enumerate IDE main window: {e!r}") from e
+        log.info("Attached to %s pid=%s title=%r", IDE_EXECUTABLE, handle.process_id,
+                 handle.main_window_title)
+        return handle
+
+    def is_attached(self) -> bool:
+        return self._app is not None
+
+    @property
+    def main_window(self) -> Any:
+        if self._main is None:
+            raise BridgeError("Not attached — call attach() first")
+        return self._main
+
+    @property
+    def process_id(self) -> int:
+        if self._app is None:
+            raise BridgeError("Not attached — call attach() first")
+        return int(self._app.process)
+
+    def read_main_window_title(self) -> str:
+        if self._main is None:
+            raise BridgeError("Not attached — call attach() first")
+        try:
+            return self._main.window_text() or ""
+        except Exception as e:
+            raise BridgeError(f"Could not read main window title: {e!r}") from e
+
+    def focus_main_window(self) -> None:
+        if self._main is None:
+            raise BridgeError("Not attached — call attach() first")
+        try:
+            self._main.set_focus()
+        except Exception as e:
+            raise BridgeError(f"Could not focus main window: {e!r}") from e
+
+    def list_top_level_windows(self) -> list:
+        if self._app is None:
+            raise BridgeError("Not attached — call attach() first")
+        return list(self._app.windows())
+
+    def dump_window_tree(self, depth: int = 4, max_children: int = 50) -> dict[str, Any]:
+        """Return the full top-level window tree as a JSON-serializable dict."""
+        if self._app is None:
+            raise BridgeError("Not attached — call attach() first")
+        windows = self.list_top_level_windows()
+        return {
+            "process_id": self._app.process,
+            "top_level_window_count": len(windows),
+            "top_level_windows": [
+                _serialize(w.element_info, depth=depth, max_children=max_children)
+                for w in windows
+            ],
+        }
+
+    def find_first(self, *, class_name: str | None = None,
+                   name: str | None = None) -> Any | None:
+        """Depth-first search the tree for the first element matching name/class.
+
+        Returns the raw ElementInfo, or None if not found.
+        """
+        if self._app is None:
+            raise BridgeError("Not attached — call attach() first")
+        for w in self.list_top_level_windows():
+            hit = _dfs_match(w.element_info, class_name=class_name, name=name)
+            if hit is not None:
+                return hit
+        return None
+
+    def dump_subtree(self, *, class_name: str | None = None, name: str | None = None,
+                     depth: int = -1, max_children: int = -1) -> dict[str, Any]:
+        """Dump the subtree rooted at the first element matching class_name/name."""
+        root = self.find_first(class_name=class_name, name=name)
+        if root is None:
+            raise BridgeError(
+                f"No element found matching class_name={class_name!r} name={name!r}"
+            )
+        return _serialize(root, depth=depth, max_children=max_children)
+
+
+def _dfs_match(info: Any, *, class_name: str | None, name: str | None) -> Any | None:
+    try:
+        cn = info.class_name or ""
+        nm = info.name or ""
+    except Exception:
+        cn, nm = "", ""
+    cls_ok = class_name is None or cn == class_name
+    name_ok = name is None or nm == name
+    if cls_ok and name_ok and (class_name is not None or name is not None):
+        return info
+    try:
+        for child in info.children():
+            hit = _dfs_match(child, class_name=class_name, name=name)
+            if hit is not None:
+                return hit
+    except Exception:
+        pass
+    return None
+
+
+def _serialize(info: Any, depth: int, max_children: int) -> dict[str, Any]:
+    """Recursively convert a pywinauto ElementInfo into a JSON-friendly dict."""
+    node: dict[str, Any] = {}
+    try:
+        node["class_name"] = info.class_name or ""
+    except Exception as e:
+        node["class_name_error"] = repr(e)
+    try:
+        node["name"] = info.name or ""
+    except Exception as e:
+        node["name_error"] = repr(e)
+    try:
+        ctrl = getattr(info, "control_type", None)
+        node["control_type"] = str(ctrl) if ctrl else ""
+    except Exception as e:
+        node["control_type_error"] = repr(e)
+    try:
+        aid = getattr(info, "automation_id", None)
+        node["automation_id"] = aid or ""
+    except Exception:
+        pass
+    try:
+        rect = info.rectangle
+        node["rectangle"] = [rect.left, rect.top, rect.right, rect.bottom]
+    except Exception:
+        node["rectangle"] = None
+
+    try:
+        children = list(info.children())
+    except Exception as e:
+        node["children_error"] = repr(e)
+        return node
+
+    truncated = 0
+    if max_children >= 0 and len(children) > max_children:
+        truncated = len(children) - max_children
+        children = children[:max_children]
+
+    if depth != 0 and children:
+        node["children"] = [
+            _serialize(c, depth=depth - 1, max_children=max_children) for c in children
+        ]
+    elif children:
+        node["child_count"] = len(children)
+
+    if truncated:
+        node["children_truncated_count"] = truncated
+    return node

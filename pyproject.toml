@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "delphi-remote"
+version = "0.1.0"
+description = "Remote control bridge for the Delphi RAD Studio IDE (Community Edition compatible)"
+requires-python = ">=3.11"
+authors = [{ name = "Katte" }]
+dependencies = [
+    "pywinauto>=0.6.8",
+    "pywin32>=306",
+    "mss>=9.0",
+    "Pillow>=10.0",
+    "imagehash>=4.3",
+    "PyYAML>=6.0",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "black>=24.0",
+]
+
+[project.scripts]
+delphi-remote = "delphi_remote.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["delphi_remote*"]
+
+[tool.setuptools.package-data]
+delphi_remote = ["*.yaml"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]

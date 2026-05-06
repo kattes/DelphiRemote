@@ -1,0 +1,25 @@
+# Default dialog rules for the Delphi IDE Remote Bridge watchdog.
+#
+# Rule shape:
+#   name:    Human-readable label (used in logs and event records).
+#   match:   Conditions an element must satisfy to be a candidate.
+#            Supported keys:
+#              window_class:    exact class_name match (e.g. TProgressForm)
+#              name:            exact element name match (e.g. "Compilieren")
+#              name_contains:   substring match against element name
+#              parent_class:    only match if a parent window has this class
+#   action:  click_button | abort
+#   button:  list of button names to try in order (action: click_button only)
+#
+# Ordering matters: earlier rules win. `default_action` applies when nothing
+# matches and the watchdog is asked to enforce strictness.
+
+rules:
+  - name: "Post-compile progress dialog"
+    match:
+      window_class: TProgressForm
+      name: "Compilieren"
+    action: click_button
+    button: ["OK"]
+
+default_action: log_only

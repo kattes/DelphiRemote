@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+build/
+dist/
+delphi_remote/logs/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.swp
+.idea/
+.vscode/
+
+# Debug / inspection dumps at repo root (e.g. ide-tree.json from inspect-windows).
+# Package data files like default_rules.yaml are not affected by this pattern.
+/*.json
