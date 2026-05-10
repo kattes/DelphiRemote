@@ -15,6 +15,17 @@
 # matches and the watchdog is asked to enforce strictness.
 
 rules:
+  - name: "External-change reload prompt"
+    # Fires when the IDE detects that one or more open units changed on disk
+    # (e.g. Claude / git / a formatter edited them). Without this rule the IDE
+    # keeps compiling its stale in-memory buffer and the next build silently
+    # uses the wrong source. "Alle Ja" reloads every modified unit at once.
+    match:
+      window_class: TMessageForm
+      name: "Informationen"
+    action: click_button
+    button: ["Alle Ja", "Ja"]
+
   - name: "Post-compile progress dialog"
     match:
       window_class: TProgressForm

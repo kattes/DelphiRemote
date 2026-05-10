@@ -214,13 +214,15 @@ class Builder:
         if auto_start:
             self.ide.ensure_project_loaded(dproj)
 
-        # Defensive pre-flight: the IDE may be minimized or behind other
-        # windows. Remember whether it was minimized so we can put it back the
-        # way we found it. We do NOT pre-scan for stale dialogs here because
-        # that costs a full UIA tree DFS per rule (~5s on a fresh IDE) — the
-        # in-loop watchdog catches anything that appears after Strg+F9, and
-        # the retry path catches anything that appears during the copy.
-        was_minimized = self.ide.restore_if_minimized()
+        # Defensive pre-flight: bring the IDE genuinely to the foreground via
+        # Win32 (not just pywinauto's softer set_foreground). This makes
+        # Delphi run its external-file-changed check NOW, so any "Neu laden?"
+        # prompt for files edited between builds opens before we send Shift+F9
+        # rather than mid-build. Without this, type_keys("+{F9}") hits a
+        # disabled main window with ElementNotEnabled, or the prompt fires
+        # after the build started and the Linker aborts.
+        was_minimized = self.ide.force_to_foreground(settle_ms=300)
+        self._drain_pre_build_modals(passes=4)
 
         title = self.ide.read_main_window_title()
         if not title.startswith(f"{project_name} - "):
@@ -355,6 +357,25 @@ class Builder:
         except Exception as e:
             log.warning("Watchdog scan failed: %r", e)
             return 0
+
+    def _drain_pre_build_modals(self, *, passes: int = 4) -> int:
+        """Loop the watchdog before triggering the build to clear modals
+        that appeared from `force_to_foreground` (typically "Neu laden?"
+        per modified file). Stops as soon as a pass dismisses nothing.
+        Returns the total number of dialogs dismissed.
+        """
+        if self.watchdog is None:
+            return 0
+        total = 0
+        for _ in range(max(1, passes)):
+            n = self._dismiss_pending_dialogs()
+            if n == 0:
+                break
+            total += n
+            time.sleep(0.2)
+        if total:
+            log.info("Pre-build watchdog dismissed %d dialog(s)", total)
+        return total
 
     def _wait_for_build_complete_with_watchdog(self, *, timeout: float,
                                                stable_for: float = 0.6) -> str:

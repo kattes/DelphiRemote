@@ -103,10 +103,16 @@ class DialogWatchdog:
         return dismissed
 
     def _find_match(self, rule: DialogRule) -> Any | None:
-        """Locate the first element matching `rule`. Returns ElementInfo or None."""
+        """Locate the first element matching `rule`. Returns ElementInfo or None.
+
+        Caps DFS at depth 2: Delphi modal dialogs (TMessageForm/TProgressForm)
+        always sit as direct children of TAppBuilder, so deeper search is wasted
+        work — a full UIA tree walk takes seconds, the bounded one takes ms.
+        """
         try:
             return self.ide.find_first(
                 class_name=rule.match_class, name=rule.match_name,
+                max_depth=2,
             )
         except BridgeError:
             return None

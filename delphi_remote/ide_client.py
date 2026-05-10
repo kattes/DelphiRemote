@@ -142,6 +142,48 @@ class DelphiIDE:
             log.warning("Could not check/restore minimized state: %r", e)
             return False
 
+    def force_to_foreground(self, settle_ms: int = 300) -> bool:
+        """Bring the IDE main window genuinely to the foreground via Win32.
+
+        pywinauto's ``set_foreground=True`` on ``type_keys`` is a soft
+        activation that often fails to fire Delphi's WM_ACTIVATEAPP-driven
+        external-file-changed check. Doing the activation through plain
+        ShowWindow + BringWindowToTop + SetForegroundWindow makes Delphi
+        notice disk edits made between builds, so the resulting "Neu laden?"
+        prompt opens *now* rather than mid-compile.
+
+        Returns True if the window was minimized and had to be restored.
+        """
+        if self._main is None:
+            raise BridgeError("Not attached — call attach() first")
+        try:
+            import win32con
+            import win32gui
+
+            hwnd = self._main.element_info.handle
+            if not hwnd:
+                return False
+            was_minimized = bool(win32gui.IsIconic(hwnd))
+            if was_minimized:
+                log.info("IDE main window minimized — restoring (hwnd=%s)", hwnd)
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                time.sleep(0.2)
+            try:
+                win32gui.BringWindowToTop(hwnd)
+            except Exception as e:
+                log.debug("BringWindowToTop refused: %r", e)
+            try:
+                win32gui.SetForegroundWindow(hwnd)
+            except Exception as e:
+                # Win10+ can refuse foreground steals from inactive callers.
+                # BringWindowToTop alone is usually enough to fire WM_ACTIVATE.
+                log.debug("SetForegroundWindow refused: %r", e)
+            time.sleep(settle_ms / 1000.0)
+            return was_minimized
+        except Exception as e:
+            log.warning("Could not force IDE to foreground: %r", e)
+            return False
+
     def minimize_main_window(self) -> None:
         """Minimize the IDE main window — used to undo a restore_if_minimized()."""
         if self._main is None:
@@ -294,15 +336,23 @@ class DelphiIDE:
         }
 
     def find_first(self, *, class_name: str | None = None,
-                   name: str | None = None) -> Any | None:
+                   name: str | None = None,
+                   max_depth: int | None = None) -> Any | None:
         """Depth-first search the tree for the first element matching name/class.
+
+        ``max_depth`` caps how deep into each top-level window's child tree the
+        search descends. Pass 2 for modal dialogs (TMessageForm/TProgressForm),
+        which always sit as direct children of TAppBuilder — turns a multi-second
+        full-tree DFS into ~50ms. Leave None for unbounded search (Meldungen
+        panel etc., which can be docked several levels deep).
 
         Returns the raw ElementInfo, or None if not found.
         """
         if self._app is None:
             raise BridgeError("Not attached — call attach() first")
         for w in self.list_top_level_windows():
-            hit = _dfs_match(w.element_info, class_name=class_name, name=name)
+            hit = _dfs_match(w.element_info, class_name=class_name, name=name,
+                             max_depth=max_depth, _depth=0)
             if hit is not None:
                 return hit
         return None
@@ -318,7 +368,8 @@ class DelphiIDE:
         return _serialize(root, depth=depth, max_children=max_children)
 
 
-def _dfs_match(info: Any, *, class_name: str | None, name: str | None) -> Any | None:
+def _dfs_match(info: Any, *, class_name: str | None, name: str | None,
+               max_depth: int | None = None, _depth: int = 0) -> Any | None:
     try:
         cn = info.class_name or ""
         nm = info.name or ""
@@ -328,9 +379,12 @@ def _dfs_match(info: Any, *, class_name: str | None, name: str | None) -> Any | 
     name_ok = name is None or nm == name
     if cls_ok and name_ok and (class_name is not None or name is not None):
         return info
+    if max_depth is not None and _depth >= max_depth:
+        return None
     try:
         for child in info.children():
-            hit = _dfs_match(child, class_name=class_name, name=name)
+            hit = _dfs_match(child, class_name=class_name, name=name,
+                             max_depth=max_depth, _depth=_depth + 1)
             if hit is not None:
                 return hit
     except Exception:
