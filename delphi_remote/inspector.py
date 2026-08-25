@@ -117,16 +117,34 @@ class Inspector:
             return None
 
     def _find_pending_dialogs(self) -> list[dict[str, Any]]:
-        """Look for child windows of the IDE that signal a pending dialog.
+        """Report dialogs that are pending, wherever they sit.
 
-        Phase 3 MVP scans for known dialog class prefixes. Mirrors the
-        watchdog's identification but without acting on them.
+        Two searches, because Delphi puts its dialogs in two different places.
+        The UIA pass below walks down from the main window and finds the ones
+        parented to it. Modal dialogs, though, are top-level windows that the
+        main window merely owns - the UIA pass never sees them, and reporting
+        "pending_dialogs: []" while such a dialog blocks everything is worse
+        than reporting nothing: it sends the caller looking in the wrong place.
+        That is exactly what happened when TReadErrorDlg blocked build after
+        build during the COMBO port.
         """
         if not self.ide.is_attached():
             return []
 
-        candidates = ("TProgressForm", "TMessageForm", "TConfirmDialog")
         results: list[dict[str, Any]] = []
+        try:
+            from delphi_remote.toplevel import find_blocking
+            for _, cls, title in find_blocking(self.ide.process_id):
+                results.append({
+                    "class_name": cls,
+                    "name": title,
+                    "rectangle": None,
+                    "scope": "top-level (blockiert das Hauptfenster)",
+                })
+        except Exception as e:                              # noqa: BLE001
+            log.debug("Top-level dialog scan failed: %r", e)
+
+        candidates = ("TProgressForm", "TMessageForm", "TConfirmDialog")
         for cls in candidates:
             try:
                 elem = self.ide.find_first(class_name=cls)

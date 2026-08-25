@@ -265,17 +265,49 @@ class DelphiIDE:
 
             dialog = wait_for_modal(app, main.handle, timeout=8.0)
             if dialog is None:
+                # Strg+F11 is swallowed in some editor contexts - notably when
+                # the .dproj itself is the active tab, which happens after the
+                # bridge opened a project and nothing else was touched since.
+                # The file association still works there; it only costs a
+                # project group, and the prompt that group produces is answered
+                # by clear_blocking() below. That is the lesser evil compared to
+                # a build that never starts.
                 log.warning(
-                    "Strg+F11 did not open the project dialog — falling back to "
-                    "the file association. Watch for a project group forming."
+                    "Strg+F11 did not open the project dialog (active tab may "
+                    "swallow it) - falling back to the file association."
                 )
                 self._launch_via_association(dproj)
+                self._answer_group_prompt()
                 return
             paste_path(dialog, dproj)
         except Exception as e:                                  # noqa: BLE001
             log.warning("Open-project dialog failed (%r) — falling back to "
                         "the file association.", e)
             self._launch_via_association(dproj)
+
+    def _answer_group_prompt(self, timeout: float = 12.0) -> None:
+        """Answer the "save project group?" prompt the association route causes.
+
+        Opening a second project through the file association adds it to a
+        project group, and the IDE then asks whether to save that group on the
+        next switch. Left unanswered the prompt blocks the main window and every
+        following build fails with ElementNotEnabled. clear_blocking() answers
+        it with "No" - the group is an artefact of this workaround, not
+        something anyone wants on disk.
+        """
+        try:
+            from delphi_remote.toplevel import clear_blocking, find_blocking
+        except Exception as e:                              # noqa: BLE001
+            log.debug("toplevel helper unavailable: %r", e)
+            return
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if find_blocking(self.process_id):
+                for entry in clear_blocking(self.process_id):
+                    log.info("Answered %s %r with %r", entry["class_name"],
+                             entry["title"], entry["button"])
+                return
+            time.sleep(0.3)
 
     @staticmethod
     def _launch_via_association(dproj: Path) -> None:

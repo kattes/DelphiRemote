@@ -430,6 +430,17 @@ class Builder:
             # missing — otherwise we'd hide a panel the user wanted open.
             self._ensure_meldungen_visible()
 
+            # Clear anything that blocks the main window before touching it.
+            # The watchdog cannot do this: it only runs once the build is under
+            # way, and it searches below the main window, where modal dialogs
+            # are not. A dialog left standing here makes every keystroke fail
+            # with ElementNotEnabled - a message that says nothing about the
+            # cause. During a port these dialogs are the norm, not the
+            # exception: every form still referring to an uninstalled
+            # component produces one when the designer opens it, and the IDE
+            # opens exactly the unit a failed build reported an error in.
+            self._clear_blocking_dialogs()
+
             # Force the IDE to re-check its open units against disk. Delphi
             # only runs that check when its main window *regains* activation.
             # The bridge already keeps the IDE in the foreground, so on a
@@ -523,6 +534,26 @@ class Builder:
                 except Exception as e:
                     log.warning("Could not re-minimize IDE: %r", e)
             _restore_foreground_hwnd(original_foreground)
+
+    def _clear_blocking_dialogs(self) -> None:
+        """Answer modal dialogs that own the main window, before we type into it."""
+        try:
+            from delphi_remote.toplevel import clear_blocking
+            answered = clear_blocking(self.ide.process_id)
+        except Exception as e:                              # noqa: BLE001
+            log.warning("Could not scan for blocking dialogs: %r", e)
+            return
+        for entry in answered:
+            log.info("Pre-build: cleared %s %r with %r",
+                     entry["class_name"], entry["title"], entry["button"])
+            if self.watchdog is not None:
+                self.watchdog.events.append(DialogEvent(
+                    rule_name="Pre-build clearing",
+                    class_name=entry["class_name"],
+                    name=entry["title"],
+                    button_clicked=entry["button"],
+                    timestamp=time.time(),
+                ))
 
     def _nudge_activation(self, settle_seconds: float = 0.8) -> None:
         """Minimize and restore the IDE so it re-checks open units against disk.
