@@ -26,6 +26,22 @@ rules:
     action: click_button
     button: ["Alle Ja", "Ja"]
 
+  - name: "Form read error"
+    # Erscheint, wenn der Formular-Designer eine Komponente nicht erzeugen kann -
+    # typisch, wenn ein DFM eine Klasse nennt, deren Package in der IDE nicht
+    # installiert ist. Bei einer Portierung ist das der Normalfall, solange
+    # Formulare noch auf entfallene Komponenten verweisen. Ohne diese Regel
+    # sperrt der modale Dialog das Hauptfenster: der naechste Build scheitert
+    # mit ElementNotEnabled, und der Inspector meldet trotzdem "pending_dialogs:
+    # []", weil er nur nach bekannten Klassen sucht.
+    # "Alle ignorieren" laedt das Formular ohne die fehlenden Komponenten - fuer
+    # einen Build genau richtig, denn uebersetzt wird aus der .pas, nicht aus
+    # dem Designer.
+    match:
+      window_class: TReadErrorDlg
+    action: click_button
+    button: ["Alle ignorieren", "Ignore All", "Ignorieren", "Ignore"]
+
   - name: "Post-compile progress dialog"
     match:
       window_class: TProgressForm
