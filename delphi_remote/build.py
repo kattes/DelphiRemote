@@ -430,6 +430,20 @@ class Builder:
             # missing — otherwise we'd hide a panel the user wanted open.
             self._ensure_meldungen_visible()
 
+            # Force the IDE to re-check its open units against disk. Delphi
+            # only runs that check when its main window *regains* activation.
+            # The bridge already keeps the IDE in the foreground, so on a
+            # second build in a row there is no activation edge, no
+            # "Informationen — Alle Ja" prompt, and the IDE happily compiles
+            # its stale editor buffer. Since the IDE opens the offending unit
+            # after every failed build, that is exactly the file the caller
+            # just edited — the loop silently builds the previous source.
+            #
+            # Minimizing and restoring creates the missing activation edge.
+            # It has to happen here, inside the build, because the watchdog
+            # that answers the reload prompt is only armed for this window.
+            self._nudge_activation()
+
             # Use Build (Umschalt+F9), not Compile (Strg+F9). Compile is a
             # no-op when the .exe is newer than all sources — title flips to
             # [Erzeugt] but no Meldungen output is produced. Build always
@@ -509,6 +523,27 @@ class Builder:
                 except Exception as e:
                     log.warning("Could not re-minimize IDE: %r", e)
             _restore_foreground_hwnd(original_foreground)
+
+    def _nudge_activation(self, settle_seconds: float = 0.8) -> None:
+        """Minimize and restore the IDE so it re-checks open units against disk.
+
+        Delphi compares timestamps of open editor buffers only when its main
+        window regains activation. Without an activation edge it keeps
+        compiling the buffer it loaded earlier, so an edit made from outside
+        the IDE never reaches the compiler — no error, no prompt, just the
+        previous source built again.
+
+        Any failure here is deliberately non-fatal: a build against a possibly
+        stale buffer is still more useful than no build at all, and the caller
+        gets the diagnostics either way.
+        """
+        try:
+            self.ide.minimize_main_window()
+            time.sleep(settle_seconds)
+            self.ide.force_to_foreground(settle_ms=int(settle_seconds * 1000))
+            time.sleep(settle_seconds)
+        except Exception as e:                              # noqa: BLE001
+            log.warning("Could not nudge IDE activation: %r", e)
 
     def _ensure_meldungen_visible(self) -> None:
         """Open the Meldungen panel via Alt+Umschalt+M if it isn't already
