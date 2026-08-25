@@ -29,9 +29,16 @@ log = logging.getLogger(__name__)
 #
 #   TReadErrorDlg   The form designer cannot create a component, usually
 #                   because its package is not installed in the IDE. During a
-#                   port that is the normal case. "Ignore All" loads the form
-#                   without the missing components, which is right for a build
-#                   — compilation reads the .pas, not the designer.
+#                   port that is the normal case. Answer it with Cancel, which
+#                   abandons loading the form and leaves the file alone.
+#
+#                   NOT "Ignore All", however tempting: that loads the form
+#                   *without* the components it could not create and marks it
+#                   modified. Delphi saves modified files before it builds, so
+#                   the stripped form goes to disk — hundreds of components and
+#                   their field declarations gone, from a build that was only
+#                   ever meant to read the .pas. This has cost two forms in
+#                   this project already; both had to be restored from git.
 #
 #   TMessageForm    In this context the follow-up errors of the same problem,
 #                   one per failing component. On a form with hundreds of them
@@ -42,7 +49,7 @@ log = logging.getLogger(__name__)
 # components. Saving it then writes the damage to disk. Nothing here saves
 # anything, but a caller that later triggers a save must know this.
 KNOWN: dict[str, list[str]] = {
-    "TReadErrorDlg": ["Alle ignorieren", "Ignore All", "Ignorieren", "Ignore"],
+    "TReadErrorDlg": ["Abbrechen", "Cancel"],
     "TMessageForm": ["Abbrechen", "Cancel", "Alle Ja", "Yes to All", "Ja", "Yes", "OK"],
 }
 

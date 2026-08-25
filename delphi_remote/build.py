@@ -535,14 +535,14 @@ class Builder:
                     log.warning("Could not re-minimize IDE: %r", e)
             _restore_foreground_hwnd(original_foreground)
 
-    def _clear_blocking_dialogs(self) -> None:
-        """Answer modal dialogs that own the main window, before we type into it."""
+    def _clear_blocking_dialogs(self) -> int:
+        """Answer modal dialogs that own the main window. Returns how many."""
         try:
             from delphi_remote.toplevel import clear_blocking
             answered = clear_blocking(self.ide.process_id)
         except Exception as e:                              # noqa: BLE001
             log.warning("Could not scan for blocking dialogs: %r", e)
-            return
+            return 0
         for entry in answered:
             log.info("Pre-build: cleared %s %r with %r",
                      entry["class_name"], entry["title"], entry["button"])
@@ -554,6 +554,7 @@ class Builder:
                     button_clicked=entry["button"],
                     timestamp=time.time(),
                 ))
+        return len(answered)
 
     def _nudge_activation(self, settle_seconds: float = 0.8) -> None:
         """Minimize and restore the IDE so it re-checks open units against disk.
@@ -563,6 +564,12 @@ class Builder:
         compiling the buffer it loaded earlier, so an edit made from outside
         the IDE never reaches the compiler — no error, no prompt, just the
         previous source built again.
+
+        Answering the prompt this provokes is part of the job. Raising it is
+        the whole point of the nudge, and it opens *after* every sweep the
+        caller ran beforehand - as a top-level modal that disables the main
+        window, so the next keystroke would die with ElementNotEnabled and a
+        message naming nothing that caused it.
 
         Any failure here is deliberately non-fatal: a build against a possibly
         stale buffer is still more useful than no build at all, and the caller
@@ -575,6 +582,7 @@ class Builder:
             time.sleep(settle_seconds)
         except Exception as e:                              # noqa: BLE001
             log.warning("Could not nudge IDE activation: %r", e)
+        self._dismiss_pending_dialogs()
 
     def _ensure_meldungen_visible(self) -> None:
         """Open the Meldungen panel via Alt+Umschalt+M if it isn't already
@@ -595,14 +603,25 @@ class Builder:
         time.sleep(0.4)
 
     def _dismiss_pending_dialogs(self) -> int:
-        """Run a single watchdog pass; safe to call any time. Returns count dismissed."""
+        """Clear whatever dialogs are open; safe to call any time.
+
+        Two sweeps, because the two kinds of dialog sit in different places.
+        The watchdog walks the UIA tree below the main window, which is where
+        the progress dialogs of a running build appear. `clear_blocking`
+        searches the process's top-level windows through Win32 and is the only
+        one that sees a modal *owning* the main window - notably the
+        "Neu laden?" prompt Delphi raises when a unit it holds open changed on
+        disk. That one disables the main window, so leaving it standing turns
+        every following step into an ElementNotEnabled.
+        """
+        total = self._clear_blocking_dialogs()
         if self.watchdog is None:
-            return 0
+            return total
         try:
-            return self.watchdog.scan_and_dismiss()
+            return total + self.watchdog.scan_and_dismiss()
         except Exception as e:
             log.warning("Watchdog scan failed: %r", e)
-            return 0
+            return total
 
     def _drain_pre_build_modals(self, *, passes: int = 4) -> int:
         """Loop the watchdog before triggering the build to clear modals
