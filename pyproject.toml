@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "delphi-remote"
-version = "0.2.0"
+version = "0.3.0"
 description = "Remote control bridge for the Delphi RAD Studio IDE (Community Edition compatible)"
 requires-python = ">=3.11"
 authors = [{ name = "Katte" }]

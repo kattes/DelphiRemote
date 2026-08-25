@@ -2,6 +2,18 @@
 
 Python-basierte Brücke zur Fernsteuerung der Delphi IDE (RAD Studio Community/Free Edition) und der daraus kompilierten VCL-Anwendungen. Ziel: Claude Code soll Builds auslösen, Compile-Output strukturiert auslesen und perspektivisch UI-Tests gegen native VCL-Applikationen ausführen können — ohne dass eine kostenpflichtige Lizenz mit Command-Line-Compiler erforderlich ist.
 
+## Status (v0.3.0)
+
+Phasen 1-5 sind erledigt; die Bridge ist seit dem CoverGenerator-Pilotprojekt produktiv im Einsatz und kann ein neues Delphi-Projekt von Build bis UI-Smoke-Test komplett über Claude Code treiben.
+
+- **Build-Loop** (`delphi-remote build <dproj>`): JSON-Output mit Diagnostics, Pre-Build-EXE-Kill, Watchdog-Dialog-Handling.
+- **Watchdog**: "Neu laden?", "Compilieren", "Erzeugen" werden auto-bestätigt; Projekt-lokale Regeln via `.delphi_remote.yaml`.
+- **Inspector** (`delphi-remote inspect`): aktuelles IDE-State als JSON.
+- **Resident Watcher** (`delphi-remote watch`): Daemon-Modus, ~1.5s Latenz weniger pro Call.
+- **Test-DSL** (`delphi_remote.testing`): `delphi_app()`-Context-Manager, File-Dialog-Helper, StateGuard, Visual-Regression.
+
+Offen / nice-to-have (Phase 6): Lokaler MCP-Server-Wrapper, Messages-Panel-Cache.
+
 ## Motivation und Hintergrund
 
 Die **Delphi Community Edition** enthält keinen Command-Line-Compiler (`dcc32.exe` ist deaktiviert/nicht enthalten). Damit fallen alle herkömmlichen MCP-Server-Lösungen aus, die auf `dcc32` oder `MSBuild` aufbauen (z.B. `delphi-build-mcp-server` von Basti-Fantasti). Auch der LSP-MCP-Server von SkybuckFlying ist keine Option, da er Delphi 13 mit gültiger Lizenz voraussetzt.
@@ -70,23 +82,20 @@ Lösungsansatz: Statt die Toolchain unter der IDE zu nutzen, **steuern wir die l
 ```
 delphi_remote/
 ├── __init__.py
-├── cli.py                  # Bash entry point
-├── build.py                # Build orchestrator
-├── watchdog.py             # Dialog watchdog (Win32 hooks)
-├── ide_client.py           # Window/IDE handling
-├── inspector.py            # IDE state introspection
-├── testing/
-│   ├── __init__.py
-│   ├── dsl.py              # Test DSL (delphi_app, window, button, ...)
-│   ├── runner.py           # Test discovery and execution
-│   └── visual.py           # Screenshot diffing (Pillow + imagehash)
-├── rules/
-│   ├── default_rules.yaml  # Standard dialog whitelist
-│   └── README.md           # How to extend rules
-├── logs/                   # Auto-generated, gitignored
-└── tests/
-    ├── unit/               # pytest unit tests for the bridge itself
-    └── integration/        # End-to-end against a sample Delphi project
+├── cli.py                  # Bash entry point (click subcommands)
+├── build.py                # Build orchestrator + Pre-Build-EXE-Kill
+├── watchdog.py             # Dialog watchdog (rule-driven, polling-based)
+├── watcher.py              # Resident TCP daemon for low-latency builds
+├── ide_client.py           # Window/IDE handling, attach, foreground hygiene
+├── inspector.py            # IDE state introspection (title parse + pending dialogs)
+├── default_rules.yaml      # Default dialog whitelist (bundled as package data)
+└── testing/
+    ├── __init__.py         # Re-exports the public DSL surface
+    ├── dsl.py              # delphi_app() context manager, DelphiApp wrapper
+    ├── file_dialog.py      # OS file-dialog detection + paste_path helper
+    ├── helpers.py          # DPI awareness, clipboard retries, graceful_close
+    ├── state_guard.py      # %APPDATA% state-file backup/restore
+    └── visual.py           # Visual regression (imagehash + pixel diff)
 ```
 
 ## Komponenten im Detail
@@ -95,10 +104,15 @@ delphi_remote/
 
 Subkommandos:
 - `build <dproj>` — kompiliert ein Projekt, gibt JSON mit Errors/Warnings/Hints
+  - Flags: `--config`, `--platform`, `--timeout`, `--rules`, `--no-watchdog`, `--no-watcher`, `--no-auto-start`, `--no-kill-exe`
+  - ⚠️ `--config` und `--platform` werden **entgegengenommen, aber nicht angewandt**
+    (Phase-1-Stand; die CLI meldet das selbst als Warning). Es gilt die im IDE
+    aktive Konfiguration. Siehe Caveat 8.
 - `inspect` — gibt aktuellen IDE-Zustand als JSON
-- `run <dproj>` — startet die kompilierte EXE und attached die Test-Bridge
-- `test <suite>` — führt eine Test-Suite gegen die laufende App aus
-- `watchdog --daemon` — startet den Watchdog standalone für manuelles Debugging
+- `watch` — startet den resident Watcher-Daemon (TCP 17556)
+- `watcher-status` / `watcher-stop` — Watcher-Lebenszyklus
+- `inspect-windows` — Window-Tree-Dump für Selektor-Discovery
+- (UI-Tests laufen als reguläre Python-Skripte, die `delphi_remote.testing` importieren — kein eigenes `test`-Subkommando, das wäre unnötiger Wrapper)
 
 Output ist **immer JSON auf stdout**, Logs gehen auf stderr und in `logs/`. Exit-Code 0 = Erfolg, 1 = Build-Fehler, 2 = Bridge-Fehler (IDE nicht erreichbar etc.).
 
@@ -217,6 +231,24 @@ API-Bausteine:
 - `app.screenshot()` / `app.dump_tree()` — Debug-Helfer
 - `app.assert_no_dialog()` — am Test-Ende kein hängender Dialog
 
+#### Praxisnotizen zur Test-DSL
+
+- `delphi_app()` leitet `title_re` vom EXE-Namen ab. Setzt das Formular seinen
+  Titel in `FormCreate` um (z. B. `"DocFilter - F07 AS BUILD table extraction"`),
+  schlägt das Warten fehl — `title_re=r"^DocFilter"` explizit mitgeben.
+- Läuft evtl. noch eine andere Instanz derselben Anwendung (auch eine vom
+  Anwender gestartete), bindet `delphi_app()` womöglich deren Fenster. Wenn das
+  stören kann: Prozess selbst starten und das Fenster über `process_id()`
+  auf die eigene PID filtern.
+- **UIA liefert bei VCL-`TEdit` keinen Text** (`window_text()` und `texts()`
+  sind leer, obwohl das Feld gefüllt ist). Zum Setzen `set_edit_text()`
+  benutzen; `^a{DEL}` + `type_keys` leert ein vorbelegtes Feld nicht zuverlässig
+  und hängt den neuen Wert an den alten an. Zum Verifizieren
+  `capture_window()` statt Textabfrage.
+- Eine gebaute Anwendung immer **mehr als einmal** durchlaufen lassen und über
+  `window.close()` beenden, nicht über `kill()` — sonst bleiben Deadlocks nach
+  dem ersten Lauf und blockierte Shutdowns unentdeckt.
+
 ### 6. Visual Regression (`testing/visual.py`)
 
 `Pillow` + `imagehash` für pixel-perfekte und perzeptuelle Vergleiche.
@@ -234,36 +266,40 @@ Baselines liegen in `tests/visual/baselines/`, neue Aufnahmen via `pytest --upda
 
 ## Phasenplan
 
-### Phase 1 — Foundation (MVP Build-Loop)
-- [ ] `ide_client.py`: Attach an `bds.exe`, Menü-Navigation, Messages-Panel auslesen
-- [ ] `build.py`: Compile-Trigger, Output-Parsing, JSON-Schema
-- [ ] `cli.py`: `build`-Subkommando funktional
-- [ ] **Acceptance**: `python -m delphi_remote.cli build sample.dproj` produziert valides JSON, Exit-Code matched Build-Status
+### Phase 1 — Foundation (MVP Build-Loop) ✅
+- [x] `ide_client.py`: Attach an `bds.exe`, Menü-Navigation, Messages-Panel auslesen
+- [x] `build.py`: Compile-Trigger, Output-Parsing, JSON-Schema
+- [x] `cli.py`: `build`-Subkommando funktional
+- [x] **Acceptance**: `delphi-remote build sample.dproj` produziert valides JSON, Exit-Code matched Build-Status
 
-### Phase 2 — Robustheit (Watchdog)
-- [ ] `watchdog.py` mit `SetWinEventHook`
-- [ ] `default_rules.yaml` mit den Top-10-Dialogen der Delphi CE
-- [ ] Logging in `logs/`
-- [ ] **Acceptance**: Bei laufendem Watchdog läuft `build` 100x in Folge ohne manuellen Eingriff durch, auch wenn parallel Dateien extern verändert werden
+### Phase 2 — Robustheit (Watchdog) ✅
+- [x] `watchdog.py` mit Rule-basiertem Scan (Implementation: Polling im Build-Loop, kein SetWinEventHook nötig)
+- [x] `default_rules.yaml` mit den realen Top-Dialogen der Delphi CE: "Neu laden?", "Compilieren", "Erzeugen"
+- [x] Pre-Build-EXE-Kill (laufende EXE schließen, damit der Linker schreiben kann) — `build.terminate_previous_exe()`
+- [x] **Acceptance**: erfüllt im CoverGenerator-Piloten — wiederholte Builds mit extern modifizierten Files laufen ohne manuellen Eingriff durch
 
-### Phase 3 — Introspektion
-- [ ] `inspector.py`: Liste offener Projekte, aktive Datei, Build-Config, Cursor-Position
-- [ ] `cli.py inspect`-Subkommando
-- [ ] **Acceptance**: JSON-Output deckt 90% der "wo bin ich gerade?"-Fragen ab
+### Phase 3 — Introspektion ✅
+- [x] `inspector.py`: aktive Datei, Build-State-Markers, pending Dialogs
+- [x] `cli.py inspect`-Subkommando
+- [x] **Acceptance**: erfüllt — Inspector deckt Title-Parse und Pending-Dialog-Scan ab; Cursor-Position bleibt offen (UIA-Limitation, kein realer Bedarf bisher)
 
-### Phase 4 — Test DSL (Pilot)
-- [ ] `testing/dsl.py` Grundbausteine: `delphi_app`, `window`, Button/Edit/Label
-- [ ] `testing/runner.py`: pytest-Integration
-- [ ] Pilot-Suite gegen ein kleines Tool (Vorschlag: Camera-Range-Tool oder Teilbereich Combo Map Viewer — kein SRT, zu groß als Einstieg)
-- [ ] **Acceptance**: 5 grüne Tests gegen das Pilot-Projekt, einer absichtlich rot zur Validierung des Failure-Pfads
+### Phase 4 — Test DSL ✅
+- [x] `testing/dsl.py`: `delphi_app()` Context-Manager, `fill_edit_in_group`, `click_button`, `wait_for_file_dialog`, `set_window_rect`, `read_status_bar`
+- [x] `testing/file_dialog.py`: `FileDialog`-Wrapper, `paste_path` (Alt+N → ^a{DEL} → ^v → {ENTER}), `wait_for_modal` / `wait_for_no_modal`
+- [x] `testing/helpers.py`: `enable_dpi_awareness`, `set_clipboard_text` (mit Retry), `graceful_close` (WM_CLOSE → SIGTERM-Fallback)
+- [x] `testing/state_guard.py`: `StateGuard(path)` Context-Manager und `guard_module()` für Script-Top-Level
+- [x] **Acceptance**: erfüllt durch den CoverGenerator-Piloten — `feature_test.py`, `aspect_test.py`, `spacing_test.py`, `smoke_test.py` haben das Pattern dort hand-rolled exerziert; ist jetzt upstream konsolidiert
+- [ ] Optional: `testing/runner.py` pytest-Plugin — bislang nicht nötig, Standalone-Scripts reichen
 
-### Phase 5 — Visual Regression + Erweiterung
-- [ ] `testing/visual.py`
-- [ ] Test-Suite-Erweiterung um Visual Checks
-- [ ] Property-Based "Smoke-Tests" via Hypothesis (zufällige Eingabesequenzen → App darf nicht crashen)
+### Phase 5 — Visual Regression ✅
+- [x] `testing/visual.py`: `matches_baseline(actual, baseline_name)` mit perzeptuellem Hash + Pixel-Diff-Ratio
+- [x] `compare_images()` + `VisualDiff`-Dataclass für detaillierte Asserts
+- [x] `capture_window()` via `mss` für Fenster-Screenshots
+- [x] Baseline-Update via Env-Var `DELPHI_REMOTE_UPDATE_BASELINES=1`
+- [ ] Optional: Property-Based "Smoke-Tests" via Hypothesis
 
 ### Phase 6 — Komfort
-- [ ] `--watch`-Mode: Bridge bleibt resident, kürzere Build-Latenz
+- [x] Resident Watcher (`delphi-remote watch`) — Daemon-Modus
 - [ ] Messages-Panel-Cache (nur Diff seit letztem Build parsen)
 - [ ] Optional: Lokaler MCP-Server-Wrapper, sodass Claude Code die Bridge als MCP-Tool sieht statt als Bash-Aufruf
 
@@ -314,6 +350,33 @@ Falls für robustes Auslesen des Messages-Panels ein kleiner VCL-Helper kompilie
 5. **CE-License-Dialog**: Erscheint sporadisch, wird durch Rule abgefangen, aber Counter sollte mitlaufen, falls Lizenz wirklich ausläuft.
 6. **WebView2-Komponenten** (relevant für Combo Map Viewer): UIA-Tree ist hier eingeschränkt, ggf. Visual Regression statt strukturierter Asserts.
 7. **Headless ist explizit kein Ziel**: Wer CI braucht, baut sich einen dedizierten Build-Server mit Auto-Login und gesperrtem User.
+8. **`--config` / `--platform` sind wirkungslos**: Der Build nimmt die im IDE
+   aktive Konfiguration, nicht die übergebene. Workaround bis
+   `set_build_config()` verdrahtet ist: im `.dproj`
+   `<Config Condition="'$(Config)'==''">Release</Config>` setzen und neu bauen —
+   das IDE bemerkt die externe Änderung, der Watchdog quittiert den
+   Reload-Prompt automatisch. Kontrolle über den Ablageort der EXE
+   (`Win64\Release` vs. `Win64\Debug`), nicht über den Rückgabewert.
+9. **Deutsches Meldungen-Panel: erledigt, Caveat war ueberholt.** Frueher hiess
+   es hier, der Clipboard-Inhalt werde verworfen und `diagnostics` bleibe leer.
+   Das stimmt nicht mehr: `_SEVERITY_MAP` in `build.py` kennt die deutschen
+   Schweregrade (Fehler, Warnung, Hinweis, Fataler Fehler), `BUILD_DONE_MARKER`
+   ist `"[Erzeugt]"`. Am 25.08.2026 gegen Delphi 12 CE (deutsch) verifiziert:
+   ein Build mit absichtlich eingebautem Fehler liefert alle vier Schweregrade
+   korrekt mit Datei, Zeile, Code und deutschem Meldungstext.
+   Die Zeile `"Clipboard content does not look like Meldungen output"` ist nur
+   eine Log-Warnung und verwirft nichts.
+   Zykluszeit: rund 14 Sekunden pro Build.
+
+10. **JSON-Ausgabe war cp1252 statt UTF-8** (behoben am 25.08.2026). Die CLI
+   serialisiert mit `ensure_ascii=False`; auf einer deutschen Konsole landeten
+   Umlaute damit als cp1252-Bytes auf stdout. JSON ist per Definition UTF-8,
+   also brach `json.loads(rohbytes.decode("utf-8"))` mit `UnicodeDecodeError`
+   auf `0xFC` ab. Unter Windows fiel es lange nicht auf, weil Pythons `open()`
+   ohne Angabe die Locale-Kodierung nimmt und damit zufaellig das Richtige tat.
+   `_force_utf8_streams()` in `cli.py` stellt stdout und stderr jetzt beim
+   Start auf UTF-8 um. Wer die Ausgabe einliest, sollte trotzdem explizit
+   `encoding="utf-8"` angeben statt sich auf das Locale zu verlassen.
 
 ## Pilot-Empfehlung
 

@@ -2,13 +2,15 @@
 
 Strategy:
   1. Verify the right project is open (compare title-bar prefix to dproj stem).
-  2. Plant a sentinel value in the clipboard.
-  3. Focus the IDE main window, send Strg+F9 (Compile).
-  4. Poll the title bar; the IDE appends "[Erzeugt]" once a build settles.
-  5. Click into the Meldungen panel, send Strg+A then Strg+C to copy all rows
+  2. Terminate any previously-built EXE that's still running (linker can't
+     overwrite a locked file — without this the build silently aborts).
+  3. Plant a sentinel value in the clipboard.
+  4. Focus the IDE main window, send Umschalt+F9 (Build).
+  5. Poll the title bar; the IDE appends "[Erzeugt]" once a build settles.
+  6. Click into the Meldungen panel, send Strg+A then Strg+C to copy all rows
      (TVirtualStringTree-based controls don't expose their data via UIA).
-  6. Read clipboard, parse `[dcc32 ...]` lines into structured diagnostics.
-  7. Restore the original clipboard contents.
+  7. Read clipboard, parse `[dcc32 ...]` lines into structured diagnostics.
+  8. Restore the original clipboard contents.
 """
 from __future__ import annotations
 
@@ -72,6 +74,7 @@ class BuildResult:
         "errors": 0, "warnings": 0, "hints": 0, "fatal_errors": 0, "other": 0,
     })
     dialogs_dismissed: list[DialogEvent] = field(default_factory=list)
+    exe_terminated: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +85,7 @@ class BuildResult:
             "diagnostics": [asdict(d) for d in self.diagnostics],
             "stats": self.stats,
             "dialogs_dismissed": [e.to_dict() for e in self.dialogs_dismissed],
+            "exe_terminated": self.exe_terminated,
         }
 
 
@@ -122,6 +126,162 @@ def _count_severities(diags: list[Diagnostic]) -> dict[str, int]:
         else:
             counts["other"] += 1
     return counts
+
+
+# ── Pre-build EXE termination ───────────────────────────────────────────────
+
+# The Delphi linker writes directly to the output EXE. If that EXE is still
+# running (because the previous test/run hasn't been closed) the linker fails
+# silently — the build ends as "aborted" with empty diagnostics, which looks
+# like a phantom failure. Terminate the previous instance before triggering
+# the new build.
+
+# Hard guard: never close these process names even if a dproj somehow shares
+# the stem. bds.exe must never be killed (it would lose the IDE session); the
+# others are common system EXEs that share a name with a project would be a
+# very unlucky collision.
+_NEVER_KILL_EXE_NAMES = frozenset({
+    "bds.exe", "explorer.exe", "cmd.exe", "powershell.exe", "pwsh.exe",
+    "python.exe", "pythonw.exe", "code.exe", "claude.exe",
+})
+
+
+def _enumerate_windows_for_exe(exe_basename_lower: str) -> list[tuple[int, int]]:
+    """Find top-level windows belonging to processes named `exe_basename_lower`.
+
+    Returns a list of (hwnd, pid) tuples. Empty list if nothing matches.
+    Best-effort: skips processes we can't query (elevated, exited).
+    """
+    import win32api
+    import win32con
+    import win32gui
+    import win32process
+
+    matches: list[tuple[int, int]] = []
+
+    def visit(hwnd: int, _: object) -> bool:
+        try:
+            if not win32gui.IsWindowVisible(hwnd):
+                return True
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            if not pid:
+                return True
+            handle = win32api.OpenProcess(
+                win32con.PROCESS_QUERY_LIMITED_INFORMATION | win32con.PROCESS_TERMINATE,
+                False, pid,
+            )
+            try:
+                exe_path = win32process.GetModuleFileNameEx(handle, 0)
+            finally:
+                win32api.CloseHandle(handle)
+            basename = exe_path.rsplit("\\", 1)[-1].lower()
+            if basename == exe_basename_lower:
+                matches.append((hwnd, pid))
+        except Exception as e:
+            log.debug("EnumWindows: skip hwnd=%s: %r", hwnd, e)
+        return True
+
+    win32gui.EnumWindows(visit, None)
+    return matches
+
+
+def terminate_previous_exe(dproj: Path, *, wait_seconds: float = 3.0) -> dict[str, Any]:
+    """Close any running instance of the EXE this dproj would produce.
+
+    Order of operations per match:
+      1. SendMessage WM_CLOSE (graceful — triggers FormDestroy / autosave).
+      2. Wait up to `wait_seconds` for the process to exit.
+      3. If still alive, TerminateProcess as a hard fallback.
+
+    Returns a dict suitable for inclusion in the build JSON output:
+      {"attempted": int, "graceful": int, "forced": int, "exe": "<basename>"}
+    """
+    exe_basename = f"{dproj.stem}.exe"
+    exe_basename_lower = exe_basename.lower()
+
+    if exe_basename_lower in _NEVER_KILL_EXE_NAMES:
+        log.warning("Refusing to terminate %r — name is on the never-kill list",
+                    exe_basename)
+        return {"attempted": 0, "graceful": 0, "forced": 0,
+                "exe": exe_basename, "skipped_reason": "never_kill_list"}
+
+    import win32api
+    import win32con
+    import win32gui
+    import win32process
+
+    matches = _enumerate_windows_for_exe(exe_basename_lower)
+    if not matches:
+        return {"attempted": 0, "graceful": 0, "forced": 0, "exe": exe_basename}
+
+    # Dedupe by pid — a single process can own several top-level windows.
+    pids_to_hwnd: dict[int, int] = {}
+    for hwnd, pid in matches:
+        pids_to_hwnd.setdefault(pid, hwnd)
+
+    log.info("Found %d running instance(s) of %s — terminating",
+             len(pids_to_hwnd), exe_basename)
+
+    graceful = 0
+    forced = 0
+    for pid, hwnd in pids_to_hwnd.items():
+        try:
+            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+        except Exception as e:
+            log.warning("WM_CLOSE PostMessage failed for pid=%s: %r", pid, e)
+
+        deadline = time.monotonic() + wait_seconds
+        exited = False
+        while time.monotonic() < deadline:
+            try:
+                handle = win32api.OpenProcess(
+                    win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid,
+                )
+            except Exception:
+                exited = True
+                break
+            try:
+                code = win32process.GetExitCodeProcess(handle)
+                if code != win32con.STILL_ACTIVE:
+                    exited = True
+                    break
+            except Exception:
+                exited = True
+                break
+            finally:
+                try:
+                    win32api.CloseHandle(handle)
+                except Exception:
+                    pass
+            time.sleep(0.1)
+
+        if exited:
+            graceful += 1
+            continue
+
+        # Hard fallback — process refused to close in time.
+        try:
+            handle = win32api.OpenProcess(win32con.PROCESS_TERMINATE, False, pid)
+        except Exception as e:
+            log.warning("Could not open pid=%s for forced terminate: %r", pid, e)
+            continue
+        try:
+            win32api.TerminateProcess(handle, 1)
+            forced += 1
+        except Exception as e:
+            log.warning("TerminateProcess on pid=%s failed: %r", pid, e)
+        finally:
+            try:
+                win32api.CloseHandle(handle)
+            except Exception:
+                pass
+
+    return {
+        "attempted": len(pids_to_hwnd),
+        "graceful": graceful,
+        "forced": forced,
+        "exe": exe_basename,
+    }
 
 
 # ── Foreground window save/restore ──────────────────────────────────────────
@@ -203,7 +363,8 @@ class Builder:
     def build(self, dproj: Path, *, timeout: float = 180.0,
               build_config: str | None = None,
               target_platform: str | None = None,
-              auto_start: bool = True) -> BuildResult:
+              auto_start: bool = True,
+              kill_running_exe: bool = True) -> BuildResult:
         if build_config or target_platform:
             log.warning("--config/--platform are accepted but not yet applied to the IDE; "
                         "active selection in IDE is used (Phase 1 limitation).")
@@ -213,6 +374,24 @@ class Builder:
 
         if auto_start:
             self.ide.ensure_project_loaded(dproj)
+
+        # Close any still-running instance of the EXE the build is about to
+        # overwrite. The Delphi linker writes the file in place and fails
+        # silently when it's locked — the resulting build looks "aborted"
+        # with empty diagnostics, which is hard to debug. Doing this here
+        # avoids that whole class of phantom failures.
+        if kill_running_exe:
+            try:
+                exe_termination = terminate_previous_exe(dproj)
+            except Exception as e:
+                log.warning("Pre-build EXE termination failed: %r", e)
+                exe_termination = {"attempted": 0, "graceful": 0, "forced": 0,
+                                   "exe": f"{project_name}.exe",
+                                   "error": repr(e)}
+        else:
+            exe_termination = {"attempted": 0, "graceful": 0, "forced": 0,
+                               "exe": f"{project_name}.exe",
+                               "skipped_reason": "disabled_by_caller"}
 
         # Defensive pre-flight: bring the IDE genuinely to the foreground via
         # Win32 (not just pywinauto's softer set_foreground). This makes
@@ -314,6 +493,7 @@ class Builder:
                 raw_output_chars=len(output_text),
                 stats=stats,
                 dialogs_dismissed=list(self.watchdog.events) if self.watchdog else [],
+                exe_terminated=exe_termination,
             )
         finally:
             try:

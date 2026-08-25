@@ -23,11 +23,37 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
+def _force_utf8_streams() -> None:
+    """Emit JSON as UTF-8 regardless of the console code page.
+
+    On a German Windows the console defaults to cp1252, so a diagnostic like
+    "Unit 'Graphics' nicht gefunden" or any message containing an umlaut left
+    stdout as cp1252 bytes. We serialize with ensure_ascii=False, so those
+    bytes ended up raw in the output — and JSON is defined as UTF-8, which
+    made the result undecodable for any consumer that follows the spec
+    (json.loads(raw) raised UnicodeDecodeError on 0xFC for "ü").
+
+    Reconfiguring the streams keeps the output human-readable and valid at the
+    same time. If a stream cannot be reconfigured (already detached, replaced
+    by a non-TextIO object in an embedding host), we leave it alone rather
+    than fail the command.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (ValueError, OSError):
+            pass
+
+
 @click.group()
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging on stderr.")
 @click.version_option()
 def main(verbose: bool) -> None:
     """Remote control bridge for the Delphi RAD Studio IDE."""
+    _force_utf8_streams()
     _setup_logging(verbose)
 
 
@@ -55,10 +81,14 @@ def main(verbose: bool) -> None:
 @click.option("--no-auto-start", is_flag=True,
               help="Fail if the IDE isn't already running with the project loaded "
                    "(default: launch bds.exe via the dproj file association).")
+@click.option("--no-kill-exe", is_flag=True,
+              help="Skip the pre-build termination of a previously-built EXE. "
+                   "Only use this if you know the EXE isn't holding its file lock "
+                   "(default: gracefully close any running <Project>.exe before build).")
 def build(dproj: Path, build_config: str, target_platform: str, timeout: float,
           rules_path: Path | None, no_watchdog: bool,
           no_watcher: bool, watcher_port: int | None,
-          no_auto_start: bool) -> None:
+          no_auto_start: bool, no_kill_exe: bool) -> None:
     """Compile a Delphi project via the running IDE."""
     from delphi_remote.build import Builder
     from delphi_remote.ide_client import BridgeError, DelphiIDE
@@ -72,7 +102,8 @@ def build(dproj: Path, build_config: str, target_platform: str, timeout: float,
             "build",
             {"dproj": str(dproj), "config": build_config,
              "platform": target_platform, "timeout": timeout,
-             "auto_start": not no_auto_start},
+             "auto_start": not no_auto_start,
+             "kill_running_exe": not no_kill_exe},
             host=DEFAULT_HOST, port=port,
             read_timeout=timeout + 120.0,
         )
@@ -109,6 +140,7 @@ def build(dproj: Path, build_config: str, target_platform: str, timeout: float,
             build_config=build_config,
             target_platform=target_platform,
             auto_start=not no_auto_start,
+            kill_running_exe=not no_kill_exe,
         )
     except BridgeError as e:
         click.echo(json.dumps({"status": "bridge_error", "error": str(e)}))

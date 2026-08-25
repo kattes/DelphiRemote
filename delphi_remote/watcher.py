@@ -157,6 +157,7 @@ class WatcherServer(socketserver.TCPServer):
         build_config = args.get("config")
         target_platform = args.get("platform")
         auto_start = bool(args.get("auto_start", True))
+        kill_running_exe = bool(args.get("kill_running_exe", True))
 
         try:
             ide = self._get_or_create_ide(strict=not auto_start)
@@ -166,6 +167,7 @@ class WatcherServer(socketserver.TCPServer):
                 dproj, timeout=timeout,
                 build_config=build_config, target_platform=target_platform,
                 auto_start=auto_start,
+                kill_running_exe=kill_running_exe,
             )
             self.ide = ide  # cache the (now-attached) handle
         except BridgeError as e:
