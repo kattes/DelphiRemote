@@ -230,12 +230,52 @@ class DelphiIDE:
 
         if not handle.main_window_title.startswith(expected_prefix):
             log.info("Active project differs — asking IDE to load %s", dproj.name)
-            self._launch_via_association(dproj)
+            self._load_project_replacing(dproj)
 
         if not handle.main_window_title.startswith(expected_prefix):
             handle = self._wait_for_project(expected_prefix, dproj, load_timeout)
 
         return handle
+
+    def _load_project_replacing(self, dproj: Path) -> None:
+        """Load `dproj` into the running IDE, replacing the current project.
+
+        Do NOT use the file association here. os.startfile on a .dproj is a
+        double-click in Explorer, and a running IDE answers that by *adding*
+        the project to the existing project group. Two projects in one group
+        means the IDE asks modally whether to save the group on every switch —
+        which blocks the bridge, surfaces as "Could not read Meldungen panel",
+        and leaves the caller wondering what happened.
+
+        File → Projekt öffnen (Strg+F11) is the operation that actually
+        replaces the active project. Falls back to the association only when
+        the dialog never appears, so a cold or unusual IDE state still loads
+        something rather than nothing.
+        """
+        try:
+            import pywinauto
+            from delphi_remote.testing.file_dialog import paste_path, wait_for_modal
+
+            main = self.main_window
+            app = pywinauto.Application(backend="uia").connect(
+                process=self.process_id,
+            )
+            self.force_to_foreground()
+            main.type_keys("^{F11}", set_foreground=True)
+
+            dialog = wait_for_modal(app, main.handle, timeout=8.0)
+            if dialog is None:
+                log.warning(
+                    "Strg+F11 did not open the project dialog — falling back to "
+                    "the file association. Watch for a project group forming."
+                )
+                self._launch_via_association(dproj)
+                return
+            paste_path(dialog, dproj)
+        except Exception as e:                                  # noqa: BLE001
+            log.warning("Open-project dialog failed (%r) — falling back to "
+                        "the file association.", e)
+            self._launch_via_association(dproj)
 
     @staticmethod
     def _launch_via_association(dproj: Path) -> None:

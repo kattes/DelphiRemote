@@ -378,6 +378,19 @@ Falls für robustes Auslesen des Messages-Panels ein kleiner VCL-Helper kompilie
    Start auf UTF-8 um. Wer die Ausgabe einliest, sollte trotzdem explizit
    `encoding="utf-8"` angeben statt sich auf das Locale zu verlassen.
 
+11. **Projektwechsel haengt Projekte NICHT mehr an eine Gruppe an**
+   (behoben am 25.08.2026). `os.startfile` auf eine `.dproj` entspricht einem
+   Doppelklick im Explorer; eine laufende IDE beantwortet das, indem sie das
+   Projekt der bestehenden **Projektgruppe hinzufuegt**. Zwei Projekte in einer
+   Gruppe heisst: bei jedem Wechsel fragt die IDE modal nach dem Speichern der
+   Gruppe. Der Dialog blockiert die Bridge und aeussert sich als
+   `Could not read Meldungen panel after multiple attempts` - ein Symptom, das
+   nicht im entferntesten auf die Ursache zeigt.
+   `_load_project_replacing()` in `ide_client.py` benutzt jetzt
+   *Datei -> Projekt oeffnen* (Strg+F11) samt Dateidialog. Das ist die
+   Operation, die das aktive Projekt **ersetzt**. Die Dateizuordnung dient nur
+   noch als Rueckfallebene, wenn der Dialog ausbleibt, und protokolliert das.
+
 ## Pilot-Empfehlung
 
 Erstes echtes Projekt für Phase 4: **Camera-Range-Tool** oder ein abgegrenzter Teilbereich des **Combo Map Viewers**. Beide sind klein genug zum schnellen Iterieren, aber real genug um echten Wert zu liefern. SRT ist als Pilot zu groß — die Login-Flows und UniGUI-Server-Komponenten verlangen einen anderen Test-Ansatz (HTTP-basiert) und würden die Bridge in der Frühphase überfordern.
