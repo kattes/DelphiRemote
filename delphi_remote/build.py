@@ -375,6 +375,14 @@ class Builder:
         if auto_start:
             self.ide.ensure_project_loaded(dproj)
 
+        # Vorbedingung, bevor irgendetwas angefasst wird: ohne das
+        # Meldungen-Fenster gibt es keine Diagnostik, und ein Bau, dessen
+        # Ergebnis niemand lesen kann, ist umsonst. Frueher stand die
+        # Pruefung erst kurz vor Umschalt+F9 und ohne Abbruch - die Bridge
+        # baute dann trotzdem und meldete minutenlang nichts. Hier kostet
+        # sie den Bruchteil einer Sekunde und laesst die IDE in Ruhe.
+        self._ensure_meldungen_visible()
+
         # Close any still-running instance of the EXE the build is about to
         # overwrite. The Delphi linker writes the file in place and fails
         # silently when it's locked — the resulting build looks "aborted"
@@ -423,13 +431,6 @@ class Builder:
         _set_clipboard_text(sentinel)
 
         try:
-            # Make sure the Meldungen panel is visible before we trigger the
-            # build. Without it we can't capture diagnostics. Toggling via
-            # Alt+Umschalt+M is a no-op when the panel is already there, so
-            # we check first and only send the shortcut when the panel is
-            # missing — otherwise we'd hide a panel the user wanted open.
-            self._ensure_meldungen_visible()
-
             # Clear anything that blocks the main window before touching it.
             # The watchdog cannot do this: it only runs once the build is under
             # way, and it searches below the main window, where modal dialogs
@@ -584,23 +585,44 @@ class Builder:
             log.warning("Could not nudge IDE activation: %r", e)
         self._dismiss_pending_dialogs()
 
-    def _ensure_meldungen_visible(self) -> None:
-        """Open the Meldungen panel via Alt+Umschalt+M if it isn't already
-        in the IDE's UIA tree. Idempotent: skips the keystroke when the
-        panel is present, since Alt+Umschalt+M is a toggle.
+    def _ensure_meldungen_visible(self, *, attempts: int = 3) -> None:
+        """Make sure the Meldungen panel is there — or give up right away.
+
+        Alt+Umschalt+M toggles the panel, so it is only sent when the panel
+        is missing; sending it blindly would hide one the user wants.
+
+        The important part is what happens when the keystroke does not help.
+        This used to log a warning and return, and the build was triggered
+        anyway. That drives the IDE through a full build whose result cannot
+        be read afterwards — minutes of UI automation on a window the user
+        cannot touch, ending in "Meldungen panel not found even after Build".
+        From the outside that is indistinguishable from a hung IDE, and it
+        has hung one.
+
+        The panel is a precondition, not an afterthought: without it there
+        are no diagnostics, so a build is pointless. Checking costs a
+        fraction of a second, so failing here is both faster and honest.
         """
-        existing = self.ide.find_first(
-            name=MELDUNGEN_PANEL_NAME, class_name=MELDUNGEN_PANEL_CLASS,
+        for versuch in range(attempts):
+            if self.ide.find_first(name=MELDUNGEN_PANEL_NAME,
+                                   class_name=MELDUNGEN_PANEL_CLASS) is not None:
+                return
+            if versuch == 0:
+                log.info("Meldungen panel not visible — sending Alt+Umschalt+M")
+                try:
+                    self.ide.main_window.type_keys("%+m", set_foreground=True)
+                except Exception as e:
+                    log.warning("Could not send Alt+Umschalt+M: %r", e)
+                    break
+            time.sleep(0.4)
+
+        raise BridgeError(
+            "Meldungen panel not available, so a build could not be read back. "
+            "Nothing was triggered in the IDE. "
+            "One-time IDE setup needed: open the panel manually via "
+            "Ansicht → Werkzeugfenster → Meldungen (or Ansicht → Meldungen). "
+            "The IDE will remember it for future sessions."
         )
-        if existing is not None:
-            return
-        log.info("Meldungen panel not visible — sending Alt+Umschalt+M")
-        try:
-            self.ide.main_window.type_keys("%+m", set_foreground=True)
-        except Exception as e:
-            log.warning("Could not send Alt+Umschalt+M to open Meldungen: %r", e)
-            return
-        time.sleep(0.4)
 
     def _dismiss_pending_dialogs(self) -> int:
         """Clear whatever dialogs are open; safe to call any time.
