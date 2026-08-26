@@ -474,15 +474,28 @@ class Builder:
 
             # Locate Meldungen *after* the compile. On a cold-boot IDE the
             # panel is auto-hidden; the IDE shows it once compile output exists.
-            meldungen = self.ide.find_first(
-                name=MELDUNGEN_PANEL_NAME, class_name=MELDUNGEN_PANEL_CLASS,
-            )
+            #
+            # Mehrfach fragen: der Bau baut die Oberflaeche der IDE um, und
+            # unmittelbar danach liefert die UIA-Abfrage schon einmal nichts,
+            # obwohl das Fenster da ist. Vor dem Bau ist es nachweislich
+            # gefunden worden - sonst waere schon dort abgebrochen worden -,
+            # also ist ein einzelner Fehlversuch hier kein Beleg fuer sein
+            # Fehlen. Ohne die Wiederholung geht die Diagnostik eines
+            # gelungenen Baus verloren.
+            meldungen = None
+            for _ in range(5):
+                meldungen = self.ide.find_first(
+                    name=MELDUNGEN_PANEL_NAME, class_name=MELDUNGEN_PANEL_CLASS,
+                )
+                if meldungen is not None:
+                    break
+                time.sleep(0.5)
             if meldungen is None:
                 raise BridgeError(
-                    "Meldungen panel not found even after Build. "
-                    "One-time IDE setup needed: open the panel manually via "
-                    "Ansicht → Werkzeugfenster → Meldungen (or Ansicht → Meldungen). "
-                    "The IDE will remember it for future sessions."
+                    "Meldungen panel vanished during the build. The build "
+                    "itself may well have succeeded - check the EXE timestamp. "
+                    "If this repeats, leave the IDE in the foreground during "
+                    "the build."
                 )
 
             output_text = self._extract_meldungen_with_retry(
