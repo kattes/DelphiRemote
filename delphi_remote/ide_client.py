@@ -229,6 +229,13 @@ class DelphiIDE:
             handle = self._poll_for_attach(deadline_seconds=startup_timeout)
 
         if not handle.main_window_title.startswith(expected_prefix):
+            # A modal dialog beside the main window (the progress window a
+            # previous build left open, above all) would swallow the
+            # project-open keystroke: answer those first.
+            from delphi_remote.toplevel import clear_blocking
+            for entry in clear_blocking(handle.process_id):
+                log.info("Before the project switch: cleared %s %r with %r",
+                         entry["class_name"], entry["title"], entry["button"])
             log.info("Active project differs — asking IDE to load %s", dproj.name)
             self._load_project_replacing(dproj)
 

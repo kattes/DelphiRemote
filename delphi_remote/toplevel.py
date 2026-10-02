@@ -48,9 +48,18 @@ log = logging.getLogger(__name__)
 # CAUTION: answering these dialogs leaves the IDE holding a form that lost
 # components. Saving it then writes the damage to disk. Nothing here saves
 # anything, but a caller that later triggers a save must know this.
+#
+#   TProgressForm   "Erzeugen" / "Compilieren": the build progress window. With
+#                   "close automatically after a successful build" unticked it
+#                   stays open after the build and blocks the IDE, so the next
+#                   build of *another* project cannot switch to it (the project
+#                   switch dies with "did not become active"). Only "OK" is
+#                   answered: while a build still runs the button reads
+#                   "Abbrechen", and that must never be clicked from here.
 KNOWN: dict[str, list[str]] = {
     "TReadErrorDlg": ["Abbrechen", "Cancel"],
     "TMessageForm": ["Abbrechen", "Cancel", "Alle Ja", "Yes to All", "Ja", "Yes", "OK"],
+    "TProgressForm": ["OK"],
 }
 
 # A TMessageForm asking whether to save something must NOT be cancelled and must
@@ -99,8 +108,11 @@ def _win32():
     return win32con, win32gui, win32process
 
 
-def find_blocking(pid: int) -> list[tuple[int, str, str]]:
-    """[(handle, class_name, title)] of visible known dialogs owned by `pid`."""
+def find_blocking(pid: int, classes: tuple[str, ...] | None = None) -> list[tuple[int, str, str]]:
+    """[(handle, class_name, title)] of visible known dialogs owned by `pid`.
+
+    `classes` narrows the search to some of the known classes (None: all).
+    """
     _, win32gui, win32process = _win32()
     found: list[tuple[int, str, str]] = []
 
@@ -111,7 +123,7 @@ def find_blocking(pid: int) -> list[tuple[int, str, str]]:
             if not win32gui.IsWindowVisible(hwnd):
                 return
             cls = win32gui.GetClassName(hwnd)
-            if cls in KNOWN:
+            if cls in KNOWN and (classes is None or cls in classes):
                 found.append((hwnd, cls, win32gui.GetWindowText(hwnd)))
         except Exception:                                   # noqa: BLE001
             return
@@ -144,7 +156,8 @@ def _click(hwnd_dialog: int, captions: list[str]) -> str | None:
     return None
 
 
-def clear_blocking(pid: int, settle_seconds: float = 0.5) -> list[dict[str, str]]:
+def clear_blocking(pid: int, settle_seconds: float = 0.5,
+                   classes: tuple[str, ...] | None = None) -> list[dict[str, str]]:
     """Answer blocking dialogs until none are left. Returns what was answered.
 
     Loops because these dialogs come in cascades — one per component the
@@ -155,7 +168,7 @@ def clear_blocking(pid: int, settle_seconds: float = 0.5) -> list[dict[str, str]
     """
     answered: list[dict[str, str]] = []
     for _ in range(_MAX_PASSES):
-        blocking = find_blocking(pid)
+        blocking = find_blocking(pid, classes)
         if not blocking:
             return answered
         progress = False

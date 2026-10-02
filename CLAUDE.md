@@ -391,6 +391,22 @@ Falls für robustes Auslesen des Messages-Panels ein kleiner VCL-Helper kompilie
    Operation, die das aktive Projekt **ersetzt**. Die Dateizuordnung dient nur
    noch als Rueckfallebene, wenn der Dialog ausbleibt, und protokolliert das.
 
+12. **Fortschrittsfenster "Erzeugen" blieb nach dem Bau stehen** (behoben am
+   02.10.2026). Ist in der IDE "Nach erfolgreicher Compilierung automatisch
+   schliessen" nicht angehakt, wartet das `TProgressForm` nach dem Bau auf OK.
+   Es ist ein Top-Level-Fenster neben dem Hauptfenster; die Watchdog-Regel
+   "Post-build progress dialog" greift nur, solange ihre Schleife laeuft. Geht
+   das Fenster erst danach auf, blieb es stehen und blockierte die IDE. Beim
+   naechsten Bau desselben Projekts raeumte `_clear_blocking_dialogs` es weg -
+   beim Bau eines *anderen* Projekts kam der Projektwechsel (Strg+F11) aber
+   vorher und scheiterte mit `did not become active within 60s`.
+   Jetzt: `toplevel.KNOWN` kennt `TProgressForm` (nur "OK" - waehrend eines
+   laufenden Baus heisst der Knopf "Abbrechen" und wird nie geklickt),
+   `ensure_project_loaded` raeumt blockierende Fenster vor dem Projektwechsel
+   ab, und `build()` schliesst das Fortschrittsfenster am Ende jedes Baus
+   (`_close_progress_window`). Verifiziert mit abwechselnden Bauten zweier
+   Projekte (DAS Designer und sein Testprojekt), danach `pending_dialogs: []`.
+
 ## Pilot-Empfehlung
 
 Erstes echtes Projekt für Phase 4: **Camera-Range-Tool** oder ein abgegrenzter Teilbereich des **Combo Map Viewers**. Beide sind klein genug zum schnellen Iterieren, aber real genug um echten Wert zu liefern. SRT ist als Pilot zu groß — die Login-Flows und UniGUI-Server-Komponenten verlangen einen anderen Test-Ansatz (HTTP-basiert) und würden die Bridge in der Frühphase überfordern.

@@ -539,6 +539,11 @@ class Builder:
                 _set_clipboard_text(saved_clip)
             except Exception as e:
                 log.warning("Could not restore clipboard: %r", e)
+            # Leave the IDE usable: the progress window stays open after a
+            # build when its "close automatically" box is unticked. It is a
+            # top-level window, so the watchdog (which searches below the main
+            # window) never sees it; answer it here, by its OK only.
+            self._close_progress_window()
             # Put the IDE back the way we found it: re-minimize before
             # restoring the user's foreground window so the IDE doesn't
             # flash visible at the very end.
@@ -569,6 +574,18 @@ class Builder:
                     timestamp=time.time(),
                 ))
         return len(answered)
+
+    def _close_progress_window(self) -> None:
+        """Answer the build progress window ("Erzeugen") with OK, if it is open."""
+        try:
+            from delphi_remote.toplevel import clear_blocking
+            answered = clear_blocking(self.ide.process_id, settle_seconds=0.2,
+                                      classes=("TProgressForm",))
+        except Exception as e:                              # noqa: BLE001
+            log.warning("Could not close the progress window: %r", e)
+            return
+        for entry in answered:
+            log.info("After the build: closed %r with %r", entry["title"], entry["button"])
 
     def _nudge_activation(self, settle_seconds: float = 0.8) -> None:
         """Minimize and restore the IDE so it re-checks open units against disk.
