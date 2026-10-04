@@ -675,21 +675,32 @@ class Builder:
             log.warning("Watchdog scan failed: %r", e)
             return total
 
-    def _drain_pre_build_modals(self, *, passes: int = 4) -> int:
-        """Loop the watchdog before triggering the build to clear modals
-        that appeared from `force_to_foreground` (typically "Neu laden?"
-        per modified file). Stops as soon as a pass dismisses nothing.
-        Returns the total number of dialogs dismissed.
+    def _drain_pre_build_modals(self, *, passes: int = 4, first_wait: float = 1.0) -> int:
+        """Clear the modals that appeared from `force_to_foreground` (typically
+        "Neu laden?" per modified file) before triggering the build. Stops as
+        soon as a pass dismisses nothing. Returns the total number of dialogs
+        dismissed.
+
+        Also without a watchdog: `_dismiss_pending_dialogs` answers the
+        top-level prompts through `clear_blocking` on its own. (It used to
+        return here at once, and a reload prompt left the build reading a
+        Meldungen panel that never came.) The prompt comes a moment after the
+        activation, so the first pass waits up to `first_wait` seconds for it.
         """
-        if self.watchdog is None:
-            return 0
         total = 0
-        for _ in range(max(1, passes)):
+        deadline = time.monotonic() + first_wait
+        while True:
             n = self._dismiss_pending_dialogs()
+            if n or time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
+        total += n
+        for _ in range(max(1, passes) - 1):
             if n == 0:
                 break
-            total += n
             time.sleep(0.2)
+            n = self._dismiss_pending_dialogs()
+            total += n
         if total:
             log.info("Pre-build watchdog dismissed %d dialog(s)", total)
         return total

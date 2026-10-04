@@ -407,6 +407,35 @@ Falls für robustes Auslesen des Messages-Panels ein kleiner VCL-Helper kompilie
    (`_close_progress_window`). Verifiziert mit abwechselnden Bauten zweier
    Projekte (DAS Designer und sein Testprojekt), danach `pending_dialogs: []`.
 
+13. **"Neu laden?", CE-Lizenzhinweis und die Projektgruppe** (behoben am
+   04.10.2026). Drei Ursachen fuer `did not become active within 60s`,
+   `Could not read Meldungen panel` und `ElementNotEnabled`:
+   - `_drain_pre_build_modals` kehrte ohne residenten Watchdog sofort zurueck
+     und suchte "Neu laden?" (Titel "Informationen", Knoepfe Ja/Nein/Alle
+     Ja/Alle Nein) gar nicht. Jetzt raeumt es immer ab (`clear_blocking`
+     beantwortet sie mit "Alle Ja": neu laden) und wartet bis zu 1 s auf die
+     Abfrage, die erst nach dem Aktivieren der IDE kommt.
+   - Der Lizenzhinweis der Community Edition (`TCENotificationDialog`, ohne
+     Fenstertitel) erscheint gelegentlich, auch ueber einem laufenden Bau. Die
+     Watchdog-Regel "CE License Reminder" (Titel enthaelt "Community
+     Edition") traf ihn nie. Jetzt in `toplevel.KNOWN` (nur "OK").
+   - Beim Projektwechsel scheiterte Strg+F11 an einem gesperrten Hauptfenster
+     (`ElementNotEnabled`), und der Rueckfall ueber die Dateizuordnung haengte
+     das Projekt als zweites einer "ProjectGroup1" an. Danach fragte die IDE
+     vor jedem Bau "ProjectGroup1 speichern unter" (Windows-Dateidialog
+     `#32770`) und blieb blockiert. Jetzt beantwortet
+     `_load_project_replacing` offene Abfragen vor und nach dem Aktivieren
+     (`_answer_pending_prompts`), wiederholt Strg+F11 einmal und meldet bei
+     gesperrtem Fenster einen klaren Fehler statt den Rueckfall zu nehmen. Den
+     gibt es nur noch, wenn Strg+F11 verschluckt wird (aktiver .dproj-Tab).
+     `_wait_for_project` beantwortet waehrend des Wartens ebenfalls Abfragen.
+   Verifiziert: zwei Durchgaenge mit je fuenf Bauten (Bau, offene Unit
+   geaendert und gleiches Projekt gebaut, zurueckgesetzt, geaendert und
+   Projektwechsel, zurueck) - alle `status: ok`, keine Projektgruppe.
+   Haengt die IDE doch einmal an "ProjectGroup1 speichern unter": Dialog
+   abbrechen, Datei -> Alle schliessen (Speichern der Gruppe: Nein), Projekt
+   neu oeffnen.
+
 ## Pilot-Empfehlung
 
 Erstes echtes Projekt für Phase 4: **Camera-Range-Tool** oder ein abgegrenzter Teilbereich des **Combo Map Viewers**. Beide sind klein genug zum schnellen Iterieren, aber real genug um echten Wert zu liefern. SRT ist als Pilot zu groß — die Login-Flows und UniGUI-Server-Komponenten verlangen einen anderen Test-Ansatz (HTTP-basiert) und würden die Bridge in der Frühphase überfordern.

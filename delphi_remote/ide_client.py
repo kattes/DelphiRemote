@@ -244,7 +244,7 @@ class DelphiIDE:
 
         return handle
 
-    def _load_project_replacing(self, dproj: Path) -> None:
+    def _load_project_replacing(self, dproj: Path, retry: bool = True) -> None:
         """Load `dproj` into the running IDE, replacing the current project.
 
         Do NOT use the file association here. os.startfile on a .dproj is a
@@ -267,10 +267,23 @@ class DelphiIDE:
             app = pywinauto.Application(backend="uia").connect(
                 process=self.process_id,
             )
+            # A prompt still open (e.g. "Neu laden?" left by a build) disables
+            # the main window: activating it or typing into it then fails with
+            # ElementNotEnabled, and the association fallback below adds the
+            # project to a group. Answer it before anything else.
+            self._answer_pending_prompts(wait=0.0)
             self.force_to_foreground()
+            # Activating the IDE makes it check its open files: a unit changed
+            # on disk while open in the editor brings up "... geändert. Neu
+            # laden?" right now, and it would swallow Strg+F11.
+            self._answer_pending_prompts(wait=1.0)
             main.type_keys("^{F11}", set_foreground=True)
 
             dialog = wait_for_modal(app, main.handle, timeout=8.0)
+            if dialog is None and self._answer_pending_prompts(wait=0.0):
+                # the prompt came only now: once more
+                main.type_keys("^{F11}", set_foreground=True)
+                dialog = wait_for_modal(app, main.handle, timeout=8.0)
             if dialog is None:
                 # Strg+F11 is swallowed in some editor contexts - notably when
                 # the .dproj itself is the active tab, which happens after the
@@ -288,9 +301,48 @@ class DelphiIDE:
                 return
             paste_path(dialog, dproj)
         except Exception as e:                                  # noqa: BLE001
-            log.warning("Open-project dialog failed (%r) — falling back to "
-                        "the file association.", e)
-            self._launch_via_association(dproj)
+            # Typically ElementNotEnabled: a modal (a prompt, the CE licence
+            # reminder, a save dialog) disables the main window. The file
+            # association is no way out here: with the IDE blocked it only
+            # queues the project as a *second* one of a project group, which
+            # then asks "ProjectGroup1 speichern unter" before every build and
+            # blocks the IDE for good. Answer the prompts and try once more;
+            # failing that, say so plainly.
+            log.warning("Open-project dialog failed (%r) — answering pending "
+                        "prompts and trying once more.", e)
+            if not retry:
+                raise BridgeError(
+                    f"Could not open {dproj.name} in the IDE: {e!r}. A modal "
+                    "dialog the bridge does not know probably blocks the main "
+                    "window; close it in the IDE and build again."
+                ) from e
+            self._answer_pending_prompts(wait=1.0)
+            self._load_project_replacing(dproj, retry=False)
+
+    def _answer_pending_prompts(self, wait: float = 1.0) -> bool:
+        """Answer the IDE's message boxes standing in the way, e.g. the reload
+        prompt for a unit changed on disk ("Alle Ja": reload, so the build
+        sees the file as it is on disk) or a "save?" prompt ("Nein").
+
+        `wait`: how long a prompt may take to appear (the IDE checks its files
+        when it is activated). True if anything was answered.
+        """
+        try:
+            from delphi_remote.toplevel import clear_blocking, find_blocking
+        except Exception as e:                              # noqa: BLE001
+            log.debug("toplevel helper unavailable: %r", e)
+            return False
+        deadline = time.monotonic() + wait
+        while True:
+            if find_blocking(self.process_id, ("TMessageForm",)):
+                answered = clear_blocking(self.process_id, classes=("TMessageForm",))
+                for entry in answered:
+                    log.info("Answered %s %r with %r", entry["class_name"],
+                             entry["title"], entry["button"])
+                return bool(answered)
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.2)
 
     def _answer_group_prompt(self, timeout: float = 12.0) -> None:
         """Answer the "save project group?" prompt the association route causes.
@@ -371,6 +423,9 @@ class DelphiIDE:
                     main_window_title=last_title,
                     main_window_class=last_class,
                 )
+            # a reload prompt of the old project's units (or a "save?") can
+            # still come up while the switch is under way and stop it
+            self._answer_pending_prompts(wait=0.0)
             time.sleep(0.5)
         raise BridgeError(
             f"Project {dproj.name!r} did not become active within {timeout:.0f}s "

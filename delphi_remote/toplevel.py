@@ -56,10 +56,20 @@ log = logging.getLogger(__name__)
 #                   switch dies with "did not become active"). Only "OK" is
 #                   answered: while a build still runs the button reads
 #                   "Abbrechen", and that must never be clicked from here.
+#
+#   TCENotificationDialog  The Community Edition licence reminder ("Die Nutzung
+#                   der Community Edition unterliegt ..."). It has no window
+#                   title, so the watchdog rule "CE License Reminder" (title
+#                   contains "Community Edition") never matched it. It pops up
+#                   now and then, also over a running build, and disables the
+#                   main window: the build then reads no Meldungen panel, the
+#                   next project switch fails with ElementNotEnabled. "OK" is
+#                   its only plain answer.
 KNOWN: dict[str, list[str]] = {
     "TReadErrorDlg": ["Abbrechen", "Cancel"],
     "TMessageForm": ["Abbrechen", "Cancel", "Alle Ja", "Yes to All", "Ja", "Yes", "OK"],
     "TProgressForm": ["OK"],
+    "TCENotificationDialog": ["OK"],
 }
 
 # A TMessageForm asking whether to save something must NOT be cancelled and must
@@ -181,7 +191,10 @@ def clear_blocking(pid: int, settle_seconds: float = 0.5,
             log.info("Cleared %s %r with %r", cls, title, caption)
             time.sleep(settle_seconds)
         if not progress:
-            break
+            # what is left has no answer of ours (e.g. "Erzeugen" while the
+            # build runs: only "Abbrechen", never clicked) - not a hang
+            log.debug("Left unanswered: %r", [(c, t) for _, c, t in blocking])
+            return answered
     log.warning("Still blocked after %d passes; %d dialog(s) answered",
                 _MAX_PASSES, len(answered))
     return answered
