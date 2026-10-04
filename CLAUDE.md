@@ -420,18 +420,28 @@ Falls für robustes Auslesen des Messages-Panels ein kleiner VCL-Helper kompilie
      Watchdog-Regel "CE License Reminder" (Titel enthaelt "Community
      Edition") traf ihn nie. Jetzt in `toplevel.KNOWN` (nur "OK").
    - Beim Projektwechsel scheiterte Strg+F11 an einem gesperrten Hauptfenster
-     (`ElementNotEnabled`), und der Rueckfall ueber die Dateizuordnung haengte
-     das Projekt als zweites einer "ProjectGroup1" an. Danach fragte die IDE
-     vor jedem Bau "ProjectGroup1 speichern unter" (Windows-Dateidialog
-     `#32770`) und blieb blockiert. Jetzt beantwortet
-     `_load_project_replacing` offene Abfragen vor und nach dem Aktivieren
-     (`_answer_pending_prompts`), wiederholt Strg+F11 einmal und meldet bei
-     gesperrtem Fenster einen klaren Fehler statt den Rueckfall zu nehmen. Den
-     gibt es nur noch, wenn Strg+F11 verschluckt wird (aktiver .dproj-Tab).
-     `_wait_for_project` beantwortet waehrend des Wartens ebenfalls Abfragen.
+     (`ElementNotEnabled`) oder wurde verschluckt, und der Rueckfall ueber die
+     Dateizuordnung haengte das Projekt als zweites einer "ProjectGroup1" an.
+     Danach fragte die IDE vor jedem Bau "ProjectGroup1 speichern unter"
+     (Windows-Dateidialog `#32770`) und blieb blockiert.
+     Jetzt (Regel des Anwenders): **vor jedem Projektwechsel Datei -> Alle
+     schliessen** (`_close_all`). Das Hauptmenue (TActionMainMenuBar) ist weder
+     per UIA noch MSAA noch WM_COMMAND erreichbar, nur per Tastatur: Alt+D,
+     300 ms warten, dann "h" ("Alle sc_h_liessen"), als echte Tastenereignisse
+     (keybd_event) - pywinauto `type_keys("%dh")` in einem Zug liess das Menue
+     offen. Speichern-Fragen: "Nein". Danach Strg+F11; verschluckt, ein zweiter
+     Versuch nach Esc; sonst ein klarer Fehler. Den Rueckfall ueber die
+     Dateizuordnung gibt es bei laufender IDE nicht mehr.
+     `_answer_pending_prompts` beantwortet offene Abfragen vor und nach dem
+     Aktivieren und waehrend `_wait_for_project`.
+   - Bau-Ende: Solange das Fortschrittsfenster "Abbrechen" anbietet
+     (`toplevel.build_running`), gilt der Bau als laufend, auch bei ruhiger
+     Titelleiste - der CE-Lizenzhinweis kommt einige Sekunden nach dem Start
+     und haelt den Bau an.
    Verifiziert: zwei Durchgaenge mit je fuenf Bauten (Bau, offene Unit
    geaendert und gleiches Projekt gebaut, zurueckgesetzt, geaendert und
-   Projektwechsel, zurueck) - alle `status: ok`, keine Projektgruppe.
+   Projektwechsel, zurueck) - alle `status: ok`, keine Projektgruppe; dann mit
+   "Alle schliessen" fuenf Bauten mit Projektwechseln, alle `status: ok`.
    Haengt die IDE doch einmal an "ProjectGroup1 speichern unter": Dialog
    abbrechen, Datei -> Alle schliessen (Speichern der Gruppe: Nein), Projekt
    neu oeffnen.

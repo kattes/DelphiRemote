@@ -255,9 +255,8 @@ class DelphiIDE:
         and leaves the caller wondering what happened.
 
         File → Projekt öffnen (Strg+F11) is the operation that actually
-        replaces the active project. Falls back to the association only when
-        the dialog never appears, so a cold or unusual IDE state still loads
-        something rather than nothing.
+        replaces the active project. Tried twice; when the dialog never
+        appears, a BridgeError says so (no association fallback any more).
         """
         try:
             import pywinauto
@@ -277,29 +276,36 @@ class DelphiIDE:
             # on disk while open in the editor brings up "... geändert. Neu
             # laden?" right now, and it would swallow Strg+F11.
             self._answer_pending_prompts(wait=1.0)
+            self._close_all()
+            self.force_to_foreground()
             main.type_keys("^{F11}", set_foreground=True)
 
             dialog = wait_for_modal(app, main.handle, timeout=8.0)
-            if dialog is None and self._answer_pending_prompts(wait=0.0):
-                # the prompt came only now: once more
+            if dialog is None:
+                # Strg+F11 is swallowed now and then (a prompt that came only
+                # now, an editor state such as the .dproj as the active tab).
+                # Once more, after the prompts and an Esc for the editor.
+                log.warning("Strg+F11 did not open the project dialog - trying once more.")
+                self._answer_pending_prompts(wait=0.0)
+                main.type_keys("{ESC}", set_foreground=True)
+                time.sleep(0.3)
+                self.force_to_foreground()
                 main.type_keys("^{F11}", set_foreground=True)
                 dialog = wait_for_modal(app, main.handle, timeout=8.0)
             if dialog is None:
-                # Strg+F11 is swallowed in some editor contexts - notably when
-                # the .dproj itself is the active tab, which happens after the
-                # bridge opened a project and nothing else was touched since.
-                # The file association still works there; it only costs a
-                # project group, and the prompt that group produces is answered
-                # by clear_blocking() below. That is the lesser evil compared to
-                # a build that never starts.
-                log.warning(
-                    "Strg+F11 did not open the project dialog (active tab may "
-                    "swallow it) - falling back to the file association."
+                # No file association here: a running IDE adds the project to
+                # a project group, which then asks "ProjectGroup1 speichern
+                # unter" before every build and blocks the IDE until someone
+                # closes the group by hand (2026-10-04, twice). An error the
+                # caller can act on is the lesser evil.
+                raise BridgeError(
+                    f"Strg+F11 did not open the open-project dialog for {dproj.name}. "
+                    "Open the project in the IDE (Datei -> Projekt oeffnen) and "
+                    "build again."
                 )
-                self._launch_via_association(dproj)
-                self._answer_group_prompt()
-                return
             paste_path(dialog, dproj)
+        except BridgeError:
+            raise
         except Exception as e:                                  # noqa: BLE001
             # Typically ElementNotEnabled: a modal (a prompt, the CE licence
             # reminder, a save dialog) disables the main window. The file
@@ -318,6 +324,52 @@ class DelphiIDE:
                 ) from e
             self._answer_pending_prompts(wait=1.0)
             self._load_project_replacing(dproj, retry=False)
+
+    def _close_all(self, timeout: float = 15.0) -> None:
+        """Datei -> Alle schliessen before a project switch - the user's rule,
+        the clean way: nothing of the old project stays open (no reload
+        prompts for its units, no editor tab that swallows Strg+F11, no
+        project group).
+
+        The main menu (TActionMainMenuBar) is reachable neither through UIA,
+        MSAA nor WM_COMMAND, only by keyboard: Alt+D opens "Datei", "h" is the
+        accelerator of "Alle sc_h_liessen" (Delphi 12, German; "c" would be
+        "Schliessen", the current file only). Plain key events (keybd_event)
+        with 300 ms for the menu to build up - pywinauto's type_keys "%dh" in
+        one go left the menu open, and it swallowed Strg+F11 afterwards.
+        Save prompts are answered "Nein" (clear_blocking): the bridge builds
+        what is on disk; unsaved edits typed into the IDE editor are lost.
+        Waits until the title shows no project; else the menu is closed with
+        Esc so it cannot eat the next keys.
+        """
+        import win32api
+        import win32con
+        import win32gui
+
+        hwnd = self._main.element_info.handle
+
+        def key(vk: int) -> None:
+            win32api.keybd_event(vk, 0, 0, 0)
+            win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+        log.info("Before the project switch: Datei -> Alle schliessen")
+        win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
+        key(ord("D"))
+        win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(0.3)
+        key(ord("H"))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.3)
+            self._answer_pending_prompts(wait=0.0)
+            title = win32gui.GetWindowText(hwnd)
+            if title and " - " not in title:  # "Delphi 12 Community Edition"
+                log.info("All closed (title %r)", title)
+                return
+        log.warning("Alle schliessen: the IDE still shows a project after %.0f s - "
+                    "closing the menu", timeout)
+        key(win32con.VK_ESCAPE)
+        key(win32con.VK_ESCAPE)
 
     def _answer_pending_prompts(self, wait: float = 1.0) -> bool:
         """Answer the IDE's message boxes standing in the way, e.g. the reload
@@ -343,30 +395,6 @@ class DelphiIDE:
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.2)
-
-    def _answer_group_prompt(self, timeout: float = 12.0) -> None:
-        """Answer the "save project group?" prompt the association route causes.
-
-        Opening a second project through the file association adds it to a
-        project group, and the IDE then asks whether to save that group on the
-        next switch. Left unanswered the prompt blocks the main window and every
-        following build fails with ElementNotEnabled. clear_blocking() answers
-        it with "No" - the group is an artefact of this workaround, not
-        something anyone wants on disk.
-        """
-        try:
-            from delphi_remote.toplevel import clear_blocking, find_blocking
-        except Exception as e:                              # noqa: BLE001
-            log.debug("toplevel helper unavailable: %r", e)
-            return
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if find_blocking(self.process_id):
-                for entry in clear_blocking(self.process_id):
-                    log.info("Answered %s %r with %r", entry["class_name"],
-                             entry["title"], entry["button"])
-                return
-            time.sleep(0.3)
 
     @staticmethod
     def _launch_via_association(dproj: Path) -> None:

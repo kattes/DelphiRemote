@@ -727,6 +727,11 @@ class Builder:
             if current != last_title:
                 last_title = current
                 last_change = time.monotonic()
+            elif self._build_still_running():
+                # the progress window still offers "Abbrechen": compiling, or
+                # waiting for a dialog over it (the CE licence reminder comes
+                # a few seconds into a build). A quiet title bar is no end.
+                last_change = time.monotonic()
             else:
                 idle = time.monotonic() - last_change
                 if BUILD_DONE_MARKER in current and idle >= stable_for:
@@ -735,6 +740,14 @@ class Builder:
                     return current
             time.sleep(0.25)
         raise BridgeError(f"Build did not complete within {timeout:.0f}s")
+
+    def _build_still_running(self) -> bool:
+        try:
+            from delphi_remote.toplevel import build_running
+            return build_running(self.ide.process_id)
+        except Exception as e:                              # noqa: BLE001
+            log.debug("Could not check the progress window: %r", e)
+            return False
 
     def _extract_meldungen_with_retry(self, *, meldungen: Any, sentinel: str,
                                       max_attempts: int = 3) -> str:

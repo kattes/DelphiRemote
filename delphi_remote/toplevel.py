@@ -118,6 +118,31 @@ def _win32():
     return win32con, win32gui, win32process
 
 
+def build_running(pid: int) -> bool:
+    """True while the IDE's progress window ("Erzeugen"/"Compilieren") offers
+    "Abbrechen"/"Cancel": the build still runs - or waits for a dialog on top
+    of it, e.g. the Community Edition licence reminder.
+    """
+    _, win32gui, _ = _win32()
+    for hwnd, _, _ in find_blocking(pid, ("TProgressForm",)):
+        captions: list[str] = []
+
+        def visit(child: int, _: Any) -> None:
+            try:
+                if win32gui.GetClassName(child) in ("TButton", "Button"):
+                    captions.append(win32gui.GetWindowText(child).replace("&", "").strip().lower())
+            except Exception:                               # noqa: BLE001
+                return
+
+        try:
+            win32gui.EnumChildWindows(hwnd, visit, None)
+        except Exception:                                   # noqa: BLE001
+            continue
+        if "abbrechen" in captions or "cancel" in captions:
+            return True
+    return False
+
+
 def find_blocking(pid: int, classes: tuple[str, ...] | None = None) -> list[tuple[int, str, str]]:
     """[(handle, class_name, title)] of visible known dialogs owned by `pid`.
 
