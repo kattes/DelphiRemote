@@ -353,10 +353,14 @@ class DelphiIDE:
             win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
 
         log.info("Before the project switch: Datei -> Alle schliessen")
+        # key events go to whatever window is in front: never into a window
+        # of the user (an "h" typed into their mail ...)
+        self._require_foreground()
         win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
         key(ord("D"))
         win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
         time.sleep(0.3)
+        self._require_foreground()
         key(ord("H"))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -370,6 +374,28 @@ class DelphiIDE:
                     "closing the menu", timeout)
         key(win32con.VK_ESCAPE)
         key(win32con.VK_ESCAPE)
+
+    def _require_foreground(self) -> None:
+        """The IDE (or one of its menus) must be the foreground window before
+        plain key events are sent; else bring it to the front once, and if
+        that fails, send nothing and say so.
+        """
+        import win32gui
+        import win32process
+
+        def ide_in_front() -> bool:
+            hwnd = win32gui.GetForegroundWindow()
+            return bool(hwnd) and win32process.GetWindowThreadProcessId(hwnd)[1] == self.process_id
+
+        if ide_in_front():
+            return
+        self.force_to_foreground()
+        time.sleep(0.3)
+        if not ide_in_front():
+            raise BridgeError(
+                "The IDE is not the foreground window (another window keeps the "
+                "focus), so no keys were sent. Leave the IDE in front and build again."
+            )
 
     def _answer_pending_prompts(self, wait: float = 1.0) -> bool:
         """Answer the IDE's message boxes standing in the way, e.g. the reload
