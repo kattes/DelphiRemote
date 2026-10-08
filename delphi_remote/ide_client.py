@@ -178,6 +178,18 @@ class DelphiIDE:
                 # Win10+ can refuse foreground steals from inactive callers.
                 # BringWindowToTop alone is usually enough to fire WM_ACTIVATE.
                 log.debug("SetForegroundWindow refused: %r", e)
+            if win32gui.GetForegroundWindow() != hwnd:
+                # Focus-stealing prevention (the user last typed in another
+                # window, e.g. the terminal running the bridge): a synthetic
+                # Alt press counts as input of this process and lets the next
+                # SetForegroundWindow through (2026-10-08).
+                import win32api
+                win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
+                win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
+                try:
+                    win32gui.SetForegroundWindow(hwnd)
+                except Exception as e:
+                    log.debug("SetForegroundWindow after Alt refused: %r", e)
             time.sleep(settle_ms / 1000.0)
             return was_minimized
         except Exception as e:
